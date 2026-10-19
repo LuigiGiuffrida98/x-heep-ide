@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { Platform, Catalog, formFromPlatform, plainMemory, hardwareFingerprint, archFor, hardwareChanges, formProblems, overlayConfig, overlayHeader } from '../platform';
+import { Platform, Catalog, formFromPlatform, plainMemory, hardwareFingerprint, archFor, hardwareChanges, formProblems, overlayConfig, overlayHeader, mapNodes } from '../platform';
 
 // What media/platform.py reads from X-HEEP's configs/general.py and configs/example_interleaved.hjson.
 const general: Platform = {
@@ -81,5 +81,26 @@ suite('Platform editor', () => {
 		const src = overlayConfig('my_soc', 'general.py', base, { ...base, heapKb: 8 }, catalog, true);
 		assert.deepStrictEqual(overlayHeader(src), { base: 'general.py', form: { ...base, heapKb: 8 } });
 		assert.strictEqual(overlayHeader('from xheep import XHeep\ndef config():\n    ...\n'), undefined);
+	});
+});
+
+suite('Memory map', () => {
+	test('RAM first, then regions by address, registers at their absolute address', () => {
+		const nodes = mapNodes({
+			banks: [{ name: 'ram0', start: 0, length: 32768 }, { name: 'ram1', start: 32768, length: 32768 }],
+			regions: [{ name: 'flash_mem', start: 0x40000000, length: 1 << 24 }, { name: 'debug', start: 0x10000000, length: 1 << 20 }],
+			domains: [{ name: 'user_peripheral_domain', start: 0x30000000, length: 1 << 20, peripherals: [{
+				name: 'uart', start: 0x30080000, length: 65536, registers: [{
+					name: 'CTRL', offset: 0xc, desc: 'UART control register', access: 'rw', reset: 0,
+					fields: [{ name: 'TX', msb: 0, lsb: 0, access: 'rw', desc: 'TX enable' }, { name: 'NCO', msb: 31, lsb: 16, access: 'rw', desc: '' }],
+				}],
+			}] }],
+		});
+		assert.deepStrictEqual(nodes.map(n => [n.label, n.description]), [['RAM', '0x00000000 · 64 KB'], ['debug', '0x10000000 · 1 MB'],
+			['user_peripheral_domain', '0x30000000 · 1 MB'], ['flash_mem', '0x40000000 · 16 MB']]);
+		const ctrl = nodes[2].children[0].children[0];
+		assert.strictEqual(ctrl.description, '0x3008000c · rw');
+		assert.strictEqual(ctrl.address, 0x3008000c);
+		assert.deepStrictEqual(ctrl.children.map(f => f.description), ['[0] rw', '[31:16] rw']);
 	});
 });

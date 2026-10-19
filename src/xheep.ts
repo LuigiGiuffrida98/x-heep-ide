@@ -159,7 +159,7 @@ export function missingModulesCommand(): string {
 }
 
 /** Runs the extension's media/platform.py (`read` or `check`) on a configuration, in X-HEEP's root. */
-export function platformScriptCommand(script: string, cmd: 'read' | 'check', config: string): string {
+export function platformScriptCommand(script: string, cmd: 'read' | 'check' | 'map', config: string): string {
 	return PICK_PYTHON + `"$py" '${script}' ${cmd} . '${config}'`;
 }
 
@@ -543,6 +543,57 @@ export function vivadoCommand(tclFile: string): string {
 export function openocdFpgaCommand(openocd: string, setup: string, bitstream?: string): string {
 	const action = bitstream ? `pld load 0 {${bitstream}}` : 'irscan fpga.tap 0x0b; runtest 1000';
 	return `${openocd} -c '${setup}; pld device virtex2 fpga.tap; init; ${action}; shutdown'`;
+}
+
+// --- Hardware development -------------------------------------------------------
+
+/**
+ * Errors and warnings of an RTL model build (buildsim.log) with a source location: Verilator's
+ * `%Warning-WIDTH: file.sv:12:5: msg` and Questasim's `** Error: file.sv(12): msg`. Paths are relative to the
+ * simulator's work dir `cwd`. Warnings are only kept where `ownFile` holds: vendored IPs have plenty.
+ */
+export function hdlProblems(log: string, cwd: string, ownFile: (file: string) => boolean): BuildProblem[] {
+	const problems = new Map<string, BuildProblem>();
+	const add = (sev: string, file: string, line: string, column: string | undefined, message: string) => {
+		const severity = /error/i.test(sev) ? 'error' : 'warning';
+		const abs = path.resolve(cwd, file);
+		if (severity === 'warning' && !ownFile(abs)) {
+			return;
+		}
+		const p: BuildProblem = { file: abs, line: Number(line), column: column ? Number(column) : undefined, severity, message: message.trim() };
+		problems.set(`${abs}:${line}:${column}:${p.message}`, p);
+	};
+	// fusesoc prefixes the first line of a failing tool's output with `ERROR: `.
+	for (const m of log.matchAll(/^(?:ERROR: )?%(Error|Warning)(?:-\w+)?: ([^\s:]+):(\d+):(?:(\d+):)? (.*)$/gm)) {
+		add(m[1], m[2], m[3], m[4], m[5]);
+	}
+	for (const m of log.matchAll(/^\*\* (Error|Warning)(?: \(suppressible\))?: (?:\(\w+-\d+\) )?([^\s(]+)\((\d+)\): (.*)$/gm)) {
+		add(m[1], m[2], m[3], undefined, m[4].replace(/^\(\w+-\d+\) /, ''));
+	}
+	return [...problems.values()];
+}
+
+/**
+ * A Verible file list (verible.filelist, read by verible-verilog-ls for cross-file navigation) from the
+ * `.vc` file fusesoc writes for Verilator: its `+incdir+` lines and source files, made absolute.
+ */
+export function veribleFileList(vc: string, cwd: string): string {
+	return vc.split('\n').map(l => l.trim()).flatMap(l => {
+		const inc = /^\+incdir\+(.+)$/.exec(l)?.[1];
+		return inc ? [`+incdir+${path.resolve(cwd, inc)}`] : /^[^-+].*\.(sv|svh|v|vh)$/.test(l) ? [path.resolve(cwd, l)] : [];
+	}).join('\n') + '\n';
+}
+
+/** The folders X-HEEP keeps verible-formatted, from its util/format-verible (`find <dirs> -name '*.sv*'`). */
+export function formattedDirs(formatScript: string): string[] {
+	return /^find (.+?) -name/m.exec(formatScript)?.[1].split(/\s+/) ?? [];
+}
+
+/** Apps X-HEEP's own app test (test/test_apps/test_apps.py) leaves out, with the reason given there, and its timeout. */
+export function appTestConfig(testApps: string): { skip: Map<string, string>; timeoutS: number } {
+	const list = /^BLACKLIST = \[([\s\S]*?)^\]/m.exec(testApps)?.[1] ?? '';
+	const skip = new Map([...list.matchAll(/^\s*"([^"]+)",?[ \t]*(?:#[ \t]*(.*))?$/gm)].map(m => [m[1], m[2]?.trim() || 'left out by X-HEEP\'s app test']));
+	return { skip, timeoutS: Number(/^SIM_TIMEOUT_S = (\d+)/m.exec(testApps)?.[1] ?? 180) };
 }
 
 /** Summary of an RTL simulation from its console output, e.g. `exit 0 · 12502 cycles`. */

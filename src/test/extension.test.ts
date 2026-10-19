@@ -9,7 +9,7 @@ import { changedFiles, isGenerated, updateCommand, Options, buildCommand, simCom
 	gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
 	condaEnvName, requiredVersions, verilatorVersion, veribleVersion, usbDevices, udevRule, missingModulesCommand,
-	boardAdapters, pickAdapter } from '../xheep';
+	boardAdapters, pickAdapter, hdlProblems, veribleFileList, formattedDirs, appTestConfig } from '../xheep';
 
 const base: Options = { project: 'hello_world', mode: 'sim', compiler: 'gcc', board: 'pynq-z2', simulator: 'verilator' };
 
@@ -344,5 +344,37 @@ suite('Tool discovery', () => {
 		const dc = JSON.parse(tools.devcontainerJson('me.ext', 'v1.0.6'));
 		assert.strictEqual(dc.image, 'ghcr.io/x-heep/x-heep/x-heep-toolchain:v1.0.6');
 		assert.deepStrictEqual(dc.customizations.vscode.extensions, ['me.ext']);
+	});
+});
+
+suite('Hardware development', () => {
+	test('model build errors and own warnings reach the Problems panel', () => {
+		const log = [
+			"%Warning-WIDTHTRUNC: ../../../hw/ip/my/my.sv:2:12: Operator ASSIGNW expects 2 bits",
+			"%Warning-UNUSED: ../../../hw/vendor/ip/x.sv:5:3: Signal is not used: 'a'",
+			"ERROR: %Error: /x/hw/ip/my/my.sv:3:10: syntax error, unexpected '='",
+			'%Error: Exiting due to 1 error(s)',
+			"** Error: ../../../hw/ip/my/my.sv(7): (vlog-2730) Undefined variable: 'z'.",
+			"** Error: (vlog-13069) ../../../hw/ip/my/my.sv(9): near \"endmodule\": syntax error.",
+		].join('\n');
+		const problems = hdlProblems(log, '/x/build/core/sim-verilator', f => !f.startsWith('/x/hw/vendor/'));
+		assert.deepStrictEqual(problems, [
+			{ file: '/x/hw/ip/my/my.sv', line: 2, column: 12, severity: 'warning', message: 'Operator ASSIGNW expects 2 bits' },
+			{ file: '/x/hw/ip/my/my.sv', line: 3, column: 10, severity: 'error', message: "syntax error, unexpected '='" },
+			{ file: '/x/hw/ip/my/my.sv', line: 7, column: undefined, severity: 'error', message: "Undefined variable: 'z'." },
+			{ file: '/x/hw/ip/my/my.sv', line: 9, column: undefined, severity: 'error', message: 'near "endmodule": syntax error.' },
+		]);
+	});
+
+	test('verible file list from the Verilator .vc', () => {
+		const vc = '--Mdir .\n--cc\n+incdir+../../../tb\n-CFLAGS -I../../../tb\n../../../hw/a.vlt\n../../../hw/a.sv\n/abs/b.svh\n-Wno-fatal\n';
+		assert.strictEqual(veribleFileList(vc, '/x/build/core/sim-verilator'), '+incdir+/x/tb\n/x/hw/a.sv\n/abs/b.svh\n');
+	});
+
+	test('reads what X-HEEP formats and what its app test leaves out', () => {
+		assert.deepStrictEqual(formattedDirs("#!/bin/bash\nfind hw/ip tb -name '*.sv*' | xargs verible-verilog-format --inplace\n"), ['hw/ip', 'tb']);
+		const cfg = appTestConfig('SIM_TIMEOUT_S = 120\n\nBLACKLIST = [\n    "example_spi_read",\n    "coremark",  # Times out\n]\n');
+		assert.deepStrictEqual([...cfg.skip], [['example_spi_read', "left out by X-HEEP's app test"], ['coremark', 'Times out']]);
+		assert.strictEqual(cfg.timeoutS, 120);
 	});
 });

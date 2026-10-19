@@ -158,6 +158,12 @@
         "icon": "$(circuit-board)"
       },
       {
+        "command": "xheep.openWaves",
+        "title": "Open Waveform",
+        "category": "X-HEEP",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "xheep.programFpga",
         "title": "Program FPGA",
         "category": "X-HEEP",
@@ -192,6 +198,18 @@
         "title": "Refresh Applications",
         "category": "X-HEEP",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "xheep.refreshMemoryMap",
+        "title": "Refresh Memory Map",
+        "category": "X-HEEP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "xheep.copyAddress",
+        "title": "Copy Address",
+        "category": "X-HEEP",
+        "icon": "$(copy)"
       }
     ],
     "viewsContainers": {
@@ -208,6 +226,12 @@
         {
           "id": "xheep.apps",
           "name": "Applications"
+        },
+        {
+          "id": "xheep.memoryMap",
+          "name": "Memory Map",
+          "when": "xheep.active",
+          "visibility": "collapsed"
         }
       ]
     },
@@ -242,6 +266,11 @@
           "command": "xheep.buildSimModel",
           "when": "view == xheep.apps && xheep.active",
           "group": "3_platform@4"
+        },
+        {
+          "command": "xheep.openWaves",
+          "when": "view == xheep.apps && xheep.active",
+          "group": "3_platform@4.5"
         },
         {
           "command": "xheep.selectMode",
@@ -282,6 +311,11 @@
           "command": "xheep.openDocs",
           "when": "view == xheep.apps && xheep.active",
           "group": "4_help@4"
+        },
+        {
+          "command": "xheep.refreshMemoryMap",
+          "when": "view == xheep.memoryMap",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -304,6 +338,11 @@
           "command": "xheep.debug",
           "when": "view == xheep.apps && xheep.active && viewItem =~ /^(app|userApp)$/",
           "group": "inline@3"
+        },
+        {
+          "command": "xheep.copyAddress",
+          "when": "view == xheep.memoryMap && viewItem == address",
+          "group": "inline"
         }
       ],
       "commandPalette": [
@@ -382,6 +421,18 @@
         {
           "command": "xheep.updateXheep",
           "when": "xheep.active"
+        },
+        {
+          "command": "xheep.openWaves",
+          "when": "xheep.active"
+        },
+        {
+          "command": "xheep.refreshMemoryMap",
+          "when": "xheep.active"
+        },
+        {
+          "command": "xheep.copyAddress",
+          "when": "false"
         }
       ]
     },
@@ -422,6 +473,16 @@
           ],
           "default": "verilator",
           "description": "RTL simulator used by the Simulation mode."
+        },
+        "xheep.rebuildModelOnSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Rebuild the simulation model in the background when an RTL file of X-HEEP (`hw/`, `tb/`) is saved, once a model was built. Its errors go to the Problems panel."
+        },
+        "xheep.formatRtlOnSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Format SystemVerilog files on save with Verible, in the folders X-HEEP formats (`util/format-verible`), so they pass its CI. Needs the Verible extension."
         },
         "xheep.fpgaBoard": {
           "type": "string",

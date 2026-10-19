@@ -3,6 +3,7 @@
 #
 #   python platform.py read  <x-heep root> <config>   -> JSON: effective values and what can be chosen
 #   python platform.py check <x-heep root> <config>   -> JSON: whether mcu-gen would accept it
+#   python platform.py map   <x-heep root> <config>   -> JSON: memory map, peripherals and their registers
 #
 # Runs in X-HEEP's Python environment. Prints one JSON object on its last line.
 
@@ -51,6 +52,95 @@ def read(xheep):
     }
 
 
+# Peripherals that are instances of an IP with another name. Bootrom and ext_peripheral have no registers.
+IP_OF = {"gpio_ao": "gpio", "rv_timer_ao": "rv_timer", "spi_flash": "spi_host", "spi2": "spi_host"}
+
+
+def register_files(root):
+    """The regtool descriptions in X-HEEP, by IP name. mcu-gen writes the templated ones (soc_ctrl, dma, ...)."""
+    import re
+    from pathlib import Path
+
+    files = {}
+    for f in sorted(Path(root, "hw").rglob("*.hjson")):
+        if any(s in f.name for s in ("testplan", ".prj.", ".lock.", ".vendor.", "secded")):
+            continue
+        text = f.read_text(errors="ignore")
+        name = re.search(r'^\s*\{?\s*name\s*:\s*"?(\w+)', text, re.M)
+        if name and "registers" in text:
+            files.setdefault(name.group(1).lower(), f)
+    return files
+
+
+def registers(path):
+    """Registers of a regtool description, with offsets as regtool computes them (multiregs expanded)."""
+    from reggen.ip_block import IpBlock
+
+    block = IpBlock.from_path(str(path), [])
+    out = []
+    for rb in block.reg_blocks.values():
+        out += [
+            {
+                "name": r.name,
+                "offset": r.offset,
+                "desc": r.desc,
+                "access": r.swaccess.key,
+                "reset": r.resval,
+                "fields": [
+                    {"name": f.name, "msb": f.bits.msb, "lsb": f.bits.lsb, "access": f.swaccess.key, "desc": f.desc or ""}
+                    for f in r.fields
+                ],
+            }
+            for r in rb.flat_regs
+        ]
+        out += [{"name": w.name, "offset": w.offset, "desc": w.desc, "window": w.size_in_bytes, "fields": []} for w in rb.windows]
+    return sorted(out, key=lambda r: r["offset"])
+
+
+def build(xheep, root):
+    """As mcu-gen does: pads, then build (fills the gaps, e.g. peripheral addresses)."""
+    import load_config
+
+    xheep.set_padring(load_config.load_pad_cfg(PurePath(f"{root}/configs/pad_cfg.py"), xheep))
+    xheep.build()
+
+
+def address_map(xheep, root):
+    """Where everything is, as mcu-gen builds it: RAM banks, address regions, peripheral domains."""
+    build(xheep, root)
+    sys.path.insert(0, f"{root}/hw/vendor/pulp_platform/register_interface/vendor/lowrisc_opentitan/util")
+    files = register_files(root)
+
+    def regs(name):
+        f = files.get(IP_OF.get(name, name))
+        try:
+            return registers(f) if f else []
+        except Exception:  # a description reggen cannot read: the peripheral is still on the map
+            return []
+
+    domains = [xheep.get_base_peripheral_domain(), xheep.get_user_peripheral_domain()]
+    return {
+        "banks": [{"name": f"ram{b.name()}", "start": b.start_address(), "length": b.size()} for b in xheep.memory_ss().iter_ram_banks()],
+        "regions": [
+            {"name": r.get_name(), "start": r.get_start_address(), "length": r.get_length()}
+            for r in xheep.address_map().get_regions()
+            if r.get_name() not in {d.get_name() for d in domains}
+        ],
+        "domains": [
+            {
+                "name": d.get_name(),
+                "start": d.get_start_address(),
+                "length": d.get_length(),
+                "peripherals": [
+                    {"name": p.get_name(), "start": d.get_start_address() + p.get_address(), "length": p.get_length(), "registers": regs(p.get_name())}
+                    for p in d.get_peripherals()
+                ],
+            }
+            for d in domains
+        ],
+    }
+
+
 def main():
     cmd, root, config = sys.argv[1:4]
     sys.path.insert(0, f"{root}/util/xheep_gen")
@@ -65,11 +155,11 @@ def main():
             if cmd == "read":
                 out["platform"] = read(xheep)
                 out["catalog"] = catalog()
+            elif cmd == "map":
+                out["map"] = address_map(xheep, root)
             else:
-                # As mcu-gen does: pads, then build (fills the gaps), then the sanity checks.
-                xheep.set_padring(load_config.load_pad_cfg(PurePath(f"{root}/configs/pad_cfg.py"), xheep))
-                xheep.build()
-                xheep.validate()
+                build(xheep, root)
+                xheep.validate()  # mcu-gen's sanity checks
     except Exception as e:  # any failure is the user's to read, as mcu-gen would print it
         out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
     out["log"] = log.getvalue()[-2000:]

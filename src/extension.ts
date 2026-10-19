@@ -17,8 +17,10 @@ import { Mode, MODES, JTAG_ADAPTERS, Adapter, boardAdapters, pickAdapter, Option
 	EXIT_BREAKPOINT, gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	linkerScript, memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
 	SETUP_GUIDE, missingModulesCommand, condaEnvName, requiredVersions, verilatorVersion, veribleVersion,
-	usbDevices, udevRule, EPFL_PROGRAMMER_USB, platformScriptCommand, largestFrame } from './xheep';
-import { Platform, Catalog, PlatformForm, formFromPlatform, plainMemory, hardwareFingerprint, archFor, overlayConfig, overlayHeader } from './platform';
+	usbDevices, udevRule, EPFL_PROGRAMMER_USB, platformScriptCommand, largestFrame,
+	hdlProblems, veribleFileList, formattedDirs, appTestConfig, BuildProblem } from './xheep';
+import { Platform, Catalog, PlatformForm, formFromPlatform, plainMemory, hardwareFingerprint, archFor, overlayConfig, overlayHeader,
+	MapNode, mapNodes, hexAddress } from './platform';
 import { EditorState, openPlatformEditor, refreshPlatformEditor } from './platformEditor';
 
 let extensionDir: string;
@@ -39,6 +41,8 @@ let apps: AppsProvider;
 let globalState: vscode.Memento;
 /** Build problems the extension explains itself (see reportBuildProblems). */
 let buildProblems: vscode.DiagnosticCollection;
+/** Verilator's and Questasim's problems of the last model build (see reportModelProblems). */
+let hdlProblemsCollection: vscode.DiagnosticCollection;
 
 const cfg = () => vscode.workspace.getConfiguration('xheep');
 const examplesDir = () => path.join(root, 'sw', 'applications');
@@ -151,7 +155,31 @@ function platformStamp(): string {
 const platformReady = () => state.get('platformStamp') === platformStamp()
 	&& fs.existsSync(path.join(root, 'hw', 'core-v-mini-mcu', 'include', 'core_v_mini_mcu_pkg.sv'));
 const modelKey = (sim: Simulator) => `modelStamp.${sim}`;
-const modelReady = (sim: Simulator) => simBuilt(sim) && state.get(modelKey(sim)) === state.get('platformStamp');
+const modelReady = (sim: Simulator) => simBuilt(sim) && state.get(modelKey(sim)) === state.get('platformStamp') && !rtlChangedSince(sim);
+
+const RTL_FILE = /\.(sv|svh|v|vh|vlt|core)$/;
+const isRtl = (file: string) => RTL_FILE.test(file) && ['hw', 'tb'].some(d => file.startsWith(path.join(root, d) + path.sep));
+
+/** Newest change to X-HEEP's RTL (hw/, tb/), including what the model build itself writes there (the boot ROM). */
+function rtlChangedAt(): number {
+	return ['hw', 'tb'].map(d => path.join(root, d)).filter(fs.existsSync)
+		.flatMap(d => fs.readdirSync(d, { recursive: true, withFileTypes: true }))
+		.filter(e => e.isFile() && RTL_FILE.test(e.name))
+		.reduce((t, e) => Math.max(t, fs.statSync(path.join(e.parentPath, e.name)).mtimeMs), 0);
+}
+
+/** Whether the RTL changed after the model was built (`model`: a simulator, or the debug model). */
+const rtlChangedSince = (model: string) => rtlChangedAt() > state.get<number>(`modelRtl.${model}`, 0);
+
+/** Model builds in progress: one at a time per simulator, as they share the build dir. */
+const modelBuilds = new Map<Simulator, Promise<boolean>>();
+/** Models whose build was running when an RTL file was saved: it may have read the file before the change. */
+const savedDuringBuild = new Set<string>();
+
+/** Records that the model is built from the RTL as it is now. */
+async function modelBuilt(model: string) {
+	await state.update(`modelRtl.${model}`, savedDuringBuild.delete(model) ? 0 : rtlChangedAt());
+}
 
 /** Runs a task in the background with a status bar spinner; the terminal only shows up when it fails. */
 async function runQuiet(title: string, task: vscode.Task, silent: boolean, report = true): Promise<boolean> {
@@ -176,6 +204,7 @@ async function generatePlatform(silent: boolean): Promise<boolean> {
 		// Apps use what the platform offers, e.g. a hardware FPU.
 		const read = await readPlatform(config);
 		await state.update('platformArch', 'platform' in read ? archFor(read.platform) : undefined);
+		memoryMap.refresh(); // the registers of templated IPs (soc_ctrl, dma, ...) come from the generated descriptions
 	}
 	return ok;
 }
@@ -185,7 +214,7 @@ async function readPlatform(config: string): Promise<{ platform: Platform; catal
 	return platformScript('read', config);
 }
 
-async function platformScript(cmd: 'read' | 'check', config: string): Promise<any> {
+async function platformScript(cmd: 'read' | 'check' | 'map', config: string): Promise<any> {
 	const r = await shOut(platformScriptCommand(path.join(extensionDir, 'media', 'platform.py'), cmd, config));
 	try {
 		const out = JSON.parse(r.out.trim().split('\n').pop() ?? '');
@@ -196,11 +225,60 @@ async function platformScript(cmd: 'read' | 'check', config: string): Promise<an
 }
 
 async function buildModel(sim: Simulator, silent: boolean): Promise<boolean> {
-	const ok = await runQuiet(`Building ${sim} model`, makeTask(`Build ${sim} model`, simModelBuildCommand(sim)), silent);
-	if (ok) {
-		await state.update(modelKey(sim), state.get('platformStamp'));
+	// A build already running (e.g. started by a save): wait for it, and build again only if it missed a change.
+	for (let running = modelBuilds.get(sim); running; running = modelBuilds.get(sim)) {
+		await running;
+		if (modelReady(sim)) {
+			return true;
+		}
 	}
-	return ok;
+	const build = (async () => {
+		savedDuringBuild.delete(sim);
+		const task = makeTask(`Build ${sim} model`, simModelBuildCommand(sim));
+		const ok = await runQuiet(`Building ${sim} model`, task, silent, false);
+		if (ok) {
+			await state.update(modelKey(sim), state.get('platformStamp'));
+			await modelBuilt(sim);
+			if (sim === 'verilator') {
+				writeVeribleFileList();
+			}
+		}
+		reportModelProblems(`${sim} model`, simDir(sim), ok, task);
+		return ok;
+	})();
+	modelBuilds.set(sim, build);
+	try {
+		return await build;
+	} finally {
+		modelBuilds.delete(sim);
+	}
+}
+
+/** Verilator's and Questasim's errors (and warnings outside vendored IPs) of the last model build, in the Problems panel. */
+function reportModelProblems(what: string, workDir: string | undefined, ok: boolean, task: vscode.Task) {
+	const vendor = path.join(root, 'hw', 'vendor') + path.sep;
+	const problems = workDir ? hdlProblems(readText(path.join(root, 'buildsim.log')), workDir, f => !f.startsWith(vendor)) : [];
+	hdlProblemsCollection.clear();
+	showProblems(hdlProblemsCollection, problems, path.join(root, 'buildsim.log'));
+	if (!ok) {
+		const error = problems.find(p => p.severity === 'error');
+		vscode.window.showErrorMessage(`X-HEEP: building the ${what} failed${error ? `: ${error.message}` : '.'}`,
+			...(error ? ['Show Problems'] : []), 'Show Log').then(pick => pick === 'Show Problems'
+			? vscode.commands.executeCommand('workbench.actions.view.problems') : pick && showTaskLog(task));
+	}
+}
+
+/**
+ * Rebuilds the simulation model in the background after an RTL file is saved, so its errors reach the Problems
+ * panel and the next run does not wait for it. Only once a model was built here, else nobody simulates here; also
+ * after a failed build, which leaves no model.
+ */
+async function rebuildModelOnSave() {
+	const sim = cfg().get<Simulator>('simulator', 'verilator');
+	if (state.get(modelKey(sim)) === undefined || modelReady(sim)) {
+		return;
+	}
+	await (platformReady() || await generatePlatform(true)) && buildModel(sim, true);
 }
 
 /** Regenerates the platform and, for simulation, the RTL model when they are out of date. */
@@ -652,13 +730,7 @@ async function newFile(app = currentApp()) {
 }
 
 
-function addToGitignore(dir: string, entry: string) {
-	const file = path.join(dir, '.gitignore');
-	const lines = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n') : [];
-	if (!lines.includes(entry)) {
-		fs.appendFileSync(file, `${lines.length && lines[lines.length - 1] !== '' ? '\n' : ''}${entry}\n`);
-	}
-}
+const addToGitignore = (dir: string, entry: string) => addLine(path.join(dir, '.gitignore'), entry);
 
 /** Runs a bash script outside the task system (works with no folder open), logging to the X-HEEP output. */
 function runLogged(title: string, script: string, cwd: string): Thenable<number | null> {
@@ -849,8 +921,8 @@ function listFiles(dir: string): string[] {
 		.filter(e => e.isFile()).map(e => path.relative(dir, path.join(e.parentPath, e.name))).sort() : [];
 }
 
-/** Compiles the app quietly: the result shows as a tick or cross, the terminal only on failure. */
-async function compile(o: Options): Promise<boolean> {
+/** Compiles the app quietly: the result shows as a tick or cross, the terminal only on failure (unless `quiet`). */
+async function compile(o: Options, quiet = false): Promise<boolean> {
 	await setBuildStatus(o.project, 'running');
 	// CMake globs the sources at configure time, so a new or removed file needs the full `make app`.
 	const key = JSON.stringify([buildCommand(o), state.get('platformStamp'), listFiles(appDir(o.project))]);
@@ -867,7 +939,7 @@ async function compile(o: Options): Promise<boolean> {
 	await state.update('lastBuildKey', ok || incremental ? key : undefined);
 	await setBuildStatus(o.project, ok ? 'ok' : 'fail');
 	const explained = reportBuildProblems(o, ok);
-	if (!ok) {
+	if (!ok && !quiet) {
 		vscode.window.showErrorMessage(`X-HEEP: build of ${o.project} failed.${explained ? ` ${explained}` : ''}`,
 			...(explained ? ['Show Problems'] : []), 'Show Log').then(pick => pick === 'Show Problems'
 			? vscode.commands.executeCommand('workbench.actions.view.problems') : pick && showTaskLog(task));
@@ -902,17 +974,22 @@ function reportBuildProblems(o: Options, ok: boolean): string | undefined {
 	];
 	// Whole-app problems (memory) go on the app's main file.
 	const main = ['main.c', 'main.cpp', 'main.S'].map(f => path.join(app, f)).find(fs.existsSync) ?? path.join(app, 'main.c');
+	showProblems(buildProblems, problems, main);
+	return problems.find(p => p.severity === 'error')?.message;
+}
+
+/** Puts problems in the Problems panel; those of no file in particular go on `fallback`. */
+function showProblems(collection: vscode.DiagnosticCollection, problems: BuildProblem[], fallback: string) {
 	const byFile = new Map<string, vscode.Diagnostic[]>();
 	for (const p of problems) {
 		const line = Math.max((p.line ?? 1) - 1, 0);
 		const d = new vscode.Diagnostic(new vscode.Range(line, Math.max((p.column ?? 1) - 1, 0), line, 1000), p.message,
 			{ error: vscode.DiagnosticSeverity.Error, warning: vscode.DiagnosticSeverity.Warning, info: vscode.DiagnosticSeverity.Information }[p.severity]);
 		d.source = 'X-HEEP';
-		const file = p.file ?? main;
+		const file = p.file ?? fallback;
 		byFile.set(file, [...byFile.get(file) ?? [], d]);
 	}
-	byFile.forEach((ds, file) => buildProblems.set(vscode.Uri.file(file), ds));
-	return problems.find(p => p.severity === 'error')?.message;
+	byFile.forEach((ds, file) => collection.set(vscode.Uri.file(file), ds));
 }
 
 async function build(app?: string) {
@@ -944,28 +1021,36 @@ function uartClose(line: string) {
 	uartAtLineStart = true;
 }
 
-/** Streams a simulator's UART log into "X-HEEP UART" under a header; the returned function flushes and stops. */
-function tailUart(uartLog: string, title: string, onText: (text: string) => void = () => { }): () => void {
-	fs.rmSync(uartLog, { force: true }); // else the first poll would replay the previous run
-	let offset = 0;
-	const pump = () => {
-		const size = fs.existsSync(uartLog) ? fs.statSync(uartLog).size : 0;
-		if (size > offset) {
-			const fd = fs.openSync(uartLog, 'r');
-			const buf = Buffer.alloc(size - offset);
-			fs.readSync(fd, buf, 0, buf.length, offset);
-			fs.closeSync(fd);
-			const text = printable(buf.toString());
-			uartAppend(text);
-			onText(text);
-			offset = size;
-		}
-	};
+/** Opens a run in "X-HEEP UART" with a header line. */
+function uartHeader(title: string) {
 	uart.appendLine(`${uartAtLineStart ? '' : '\n'}── ${title} · ${new Date().toLocaleTimeString()} ${'─'.repeat(30)}`);
 	uartAtLineStart = true;
 	uart.show(true);
+}
+
+/** Follows a simulator's UART log as it grows, passing on new text; the returned function flushes and stops. */
+function followFile(file: string, onText: (text: string) => void): () => void {
+	fs.rmSync(file, { force: true }); // else the first poll would replay the previous run
+	let offset = 0;
+	const pump = () => {
+		const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
+		if (size > offset) {
+			const fd = fs.openSync(file, 'r');
+			const buf = Buffer.alloc(size - offset);
+			fs.readSync(fd, buf, 0, buf.length, offset);
+			fs.closeSync(fd);
+			onText(printable(buf.toString()));
+			offset = size;
+		}
+	};
 	const poll = setInterval(pump, 250);
 	return () => { clearInterval(poll); pump(); };
+}
+
+/** Streams a simulator's UART log into "X-HEEP UART" under a header; the returned function flushes and stops. */
+function tailUart(uartLog: string, title: string): () => void {
+	uartHeader(title);
+	return followFile(uartLog, uartAppend);
 }
 
 /** Starts a shell command in its own process group with its output logged to "X-HEEP". */
@@ -1013,15 +1098,20 @@ async function waitUntil(test: () => boolean, timeoutMs: number, abort?: Promise
 	return test();
 }
 
-/** Runs the simulation in the background: its log goes to "X-HEEP", only the app's UART to "X-HEEP UART". */
-async function simulate(o: Options): Promise<{ ok: boolean; text: string } | undefined> {
+/**
+ * Runs the built app on the RTL model, its log to "X-HEEP" and its UART text to `onText`. Stops it on an exception
+ * (X-HEEP then spins in its handler forever), on `token` or after `timeoutMs`; undefined when stopped by `token`.
+ */
+async function runSim(o: Options, onText: (text: string) => void, token: vscode.CancellationToken, timeoutMs?: number)
+	: Promise<{ ok: boolean; text: string; exception?: string } | undefined> {
 	// shortcut: Questasim's UART log is assumed to be uart0.log in sim-modelsim/ like Verilator's, unverified.
 	const dir = simDir(o.simulator);
 	let job: Job | undefined;
 	let seen = '';
 	let exception: string | undefined;
-	// After an exception X-HEEP spins in its handler and the simulation would never end.
-	const stopUart = tailUart(dir ? path.join(dir, 'uart0.log') : '', o.project, text => {
+	let timedOut = false;
+	const stopUart = followFile(dir ? path.join(dir, 'uart0.log') : '', text => {
+		onText(text);
 		seen += text;
 		exception ??= uartException(seen);
 		if (exception) {
@@ -1030,22 +1120,37 @@ async function simulate(o: Options): Promise<{ ok: boolean; text: string } | und
 	});
 	job = startJob(o.simulator === 'verilator' && dir ? verilatorRunCommand(dir) : withEnvSetup(simCommand(o)), root);
 	const sim = job;
-	const code = await vscode.window.withProgress(
-		{ location: vscode.ProgressLocation.Notification, title: `Simulating ${o.project}…`, cancellable: true },
-		(_progress, token) => { token.onCancellationRequested(sim.kill); return sim.done; });
+	const cancel = token.onCancellationRequested(sim.kill);
+	const timer = timeoutMs ? setTimeout(() => { timedOut = true; sim.kill(); }, timeoutMs) : undefined;
+	const code = await sim.done;
+	clearTimeout(timer);
+	cancel.dispose();
 	stopUart();
-	const summary = exception ? { ok: false, text: `exception: ${exception}` } : simSummary(sim.log());
-	const stopped = code === null && !exception;
-	uartClose(stopped ? 'stopped' : `${summary.ok ? '✓' : '✗'} ${summary.text}`);
 	if (exception) {
-		vscode.window.showWarningMessage(`X-HEEP: ${o.project} hit an exception (${exception}) and stopped. Run it in Debug to see where.`);
-	} else if (!stopped && summary.text.startsWith('memory access outside')) {
+		return { ok: false, text: `exception: ${exception}`, exception };
+	}
+	if (timedOut) {
+		return { ok: false, text: `no exit after ${timeoutMs! / 1000} s` };
+	}
+	return code === null ? undefined : simSummary(sim.log());
+}
+
+/** Runs the simulation in the background: its log goes to "X-HEEP", only the app's UART to "X-HEEP UART". */
+async function simulate(o: Options): Promise<{ ok: boolean; text: string } | undefined> {
+	uartHeader(o.project);
+	const summary = await vscode.window.withProgress(
+		{ location: vscode.ProgressLocation.Notification, title: `Simulating ${o.project}…`, cancellable: true },
+		(_progress, token) => runSim(o, uartAppend, token));
+	uartClose(summary ? `${summary.ok ? '✓' : '✗'} ${summary.text}` : 'stopped');
+	if (summary?.exception) {
+		vscode.window.showWarningMessage(`X-HEEP: ${o.project} hit an exception (${summary.exception}) and stopped. Run it in Debug to see where.`);
+	} else if (summary?.text.startsWith('memory access outside')) {
 		vscode.window.showWarningMessage(`X-HEEP: ${o.project} accessed an address outside X-HEEP's memory map. `
 			+ 'This is usually a NULL or wrong pointer, e.g. after a failed fopen or malloc, or a register address from another board.');
-	} else if (!stopped && summary.text === 'simulation failed') {
+	} else if (summary?.text === 'simulation failed') {
 		vscode.window.showErrorMessage(`X-HEEP: simulation of ${o.project} failed.`, 'Show Log').then(pick => pick && output.show());
 	}
-	return stopped ? undefined : summary;
+	return summary;
 }
 
 /** Runs the app in the current mode; for simulation and JTAG, resolves with the result shown in "X-HEEP UART". */
@@ -1257,13 +1362,17 @@ async function runJtag(o: Options, fpga: { bitstream?: string; tool?: Programmer
 
 const debugSimDir = () => path.join(root, DEBUG_BUILD_ROOT, 'sim-verilator');
 const debugModelReady = () => fs.existsSync(path.join(debugSimDir(), 'Vtestharness'))
-	&& state.get('modelStamp.debug') === state.get('platformStamp');
+	&& state.get('modelStamp.debug') === state.get('platformStamp') && !rtlChangedSince('debug');
 
+// shortcut: saves during a debug model build are not tracked (savedDuringBuild), so such an edit waits for the next one.
 async function buildDebugModel(): Promise<boolean> {
-	const ok = await runQuiet('Building verilator debug model', makeTask('Build debug model', debugModelBuildCommand()), true);
+	const task = makeTask('Build debug model', debugModelBuildCommand());
+	const ok = await runQuiet('Building verilator debug model', task, true, false);
 	if (ok) {
 		await state.update('modelStamp.debug', state.get('platformStamp'));
+		await modelBuilt('debug');
 	}
+	reportModelProblems('verilator debug model', debugSimDir(), ok, task);
 	return ok;
 }
 
@@ -1440,9 +1549,7 @@ async function streamSerial(title: string, onText: (text: string) => void = () =
 	const port = await serialPort();
 	stopSerial();
 	vscode.window.terminals.find(t => t.name === 'X-HEEP UART')?.dispose(); // a serial monitor holds the port too
-	uart.appendLine(`${uartAtLineStart ? '' : '\n'}── ${title} · ${new Date().toLocaleTimeString()} ${'─'.repeat(30)}`);
-	uartAtLineStart = true;
-	uart.show(true);
+	uartHeader(title);
 	if (!port) {
 		return () => { };
 	}
@@ -1486,6 +1593,177 @@ async function buildSimModel() {
 
 function mcuGen() {
 	return generatePlatform(false);
+}
+
+// --- Hardware development ---------------------------------------------------
+// For whoever changes the RTL: waveforms, SystemVerilog editing through the Verible extension, the memory map,
+// and every app run on the changed model (Testing view).
+
+const SURFER = 'surfer-project.surfer';
+const VERIBLE = 'chipsalliance.verible';
+
+/** Opens the newest waveform Verilator wrote (its testbench always dumps waveform.fst), in Surfer or else GTKWave. */
+async function openWaves() {
+	const fst = [simDir('verilator'), debugSimDir()].flatMap(d => d ? [path.join(d, 'waveform.fst')] : []).filter(fs.existsSync)
+		.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+	if (!fst) {
+		vscode.window.showInformationMessage('X-HEEP: no waveform yet. Run an app in Simulation with Verilator: it writes waveform.fst.');
+		return;
+	}
+	if (!vscode.extensions.getExtension(SURFER) && await sh('command -v gtkwave', false)) {
+		spawn('gtkwave', [fst], { cwd: path.dirname(fst), detached: true, stdio: 'ignore', env: { ...process.env, ...taskEnv() } }).unref();
+		return;
+	}
+	if (await ensureExtension(SURFER, 'Viewing waveforms in VS Code')) {
+		await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(fst));
+	}
+}
+
+/** Adds a line to a file if missing (a .gitignore, git's info/exclude). */
+function addLine(file: string, entry: string) {
+	const lines = fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n') : [];
+	if (!lines.includes(entry)) {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.appendFileSync(file, `${lines.length && lines[lines.length - 1] !== '' ? '\n' : ''}${entry}\n`);
+	}
+}
+
+/**
+ * Writes verible.filelist in the project, the files of the Verilator model, so verible-verilog-ls finds modules,
+ * packages and includes across files. Kept out of git in .git/info/exclude: X-HEEP's own .gitignore stays as is.
+ */
+function writeVeribleFileList() {
+	const dir = simDir('verilator');
+	const vc = dir && fs.existsSync(dir) ? fs.readdirSync(dir).find(f => f.endsWith('.vc')) : undefined;
+	if (!dir || !vc) {
+		return;
+	}
+	fs.writeFileSync(path.join(projectDir(), 'verible.filelist'), veribleFileList(readText(path.join(dir, vc)), dir));
+	execFile('git', ['rev-parse', '--git-path', 'info/exclude'], { cwd: projectDir() }, (err, out) => {
+		if (!err) {
+			addLine(path.resolve(projectDir(), out.trim()), 'verible.filelist');
+		}
+	});
+}
+
+/**
+ * Sets the Verible extension up for X-HEEP (where the user has not): its language server from the verible install
+ * X-HEEP uses, so formatting matches X-HEEP's, and as the SystemVerilog formatter. Offers it once when missing.
+ */
+async function setupVerible(offer: boolean) {
+	if (!vscode.extensions.getExtension(VERIBLE)) {
+		if (offer && !state.get('veribleOffered')) {
+			await state.update('veribleOffered', true);
+			await ensureExtension(VERIBLE, 'SystemVerilog lint, formatting as X-HEEP does it and go to definition across modules');
+		}
+		return;
+	}
+	const verible = vscode.workspace.getConfiguration('verible', folder.uri);
+	const ls = (await shOut('command -v verible-verilog-ls')).out.trim().split('\n').pop();
+	if (verible.inspect('path')?.workspaceValue === undefined && ls && path.isAbsolute(ls)) {
+		await verible.update('path', ls, vscode.ConfigurationTarget.Workspace);
+	}
+	if (verible.inspect('arguments')?.workspaceValue === undefined) {
+		// A project's own .rules.verible_lint applies, as for verible-verilog-lint.
+		await verible.update('arguments', ['--rules_config_search'], vscode.ConfigurationTarget.Workspace);
+	}
+	for (const language of ['systemverilog', 'verilog']) {
+		const editor = vscode.workspace.getConfiguration('editor', { uri: folder.uri, languageId: language });
+		if (editor.inspect('defaultFormatter')?.workspaceLanguageValue === undefined) {
+			await editor.update('defaultFormatter', VERIBLE, vscode.ConfigurationTarget.Workspace, true);
+		}
+	}
+}
+
+/** Formats an RTL file on save as X-HEEP's util/format-verible would, only in the folders it covers (not vendored IPs). */
+function formatOnSave(e: vscode.TextDocumentWillSaveEvent) {
+	const file = e.document.uri.fsPath;
+	const dirs = formattedDirs(readText(path.join(root, 'util', 'format-verible'))).map(d => path.join(root, d) + path.sep);
+	// Another formatter (e.g. of a Verilog extension) would not format as X-HEEP's CI checks.
+	if (cfg().get<boolean>('formatRtlOnSave', true) && vscode.extensions.getExtension(VERIBLE)
+		&& /\.sv/.test(path.basename(file)) && dirs.some(d => file.startsWith(d))) {
+		e.waitUntil(Promise.resolve(vscode.commands.executeCommand<vscode.TextEdit[] | undefined>('vscode.executeFormatDocumentProvider',
+			e.document.uri, { tabSize: 2, insertSpaces: true })).then(edits => edits ?? []));
+	}
+}
+
+class MemoryMapProvider implements vscode.TreeDataProvider<MapNode> {
+	private nodes?: Promise<MapNode[]>;
+	private emitter = new vscode.EventEmitter<void>();
+	readonly onDidChangeTreeData = this.emitter.event;
+	refresh() { this.nodes = undefined; this.emitter.fire(); }
+	getChildren(node?: MapNode) {
+		return node ? node.children : this.nodes ??= platformScript('map', configPath()).then(r => r.error
+			? [{ label: 'The platform cannot be read', description: '', tooltip: r.error, children: [] }] : mapNodes(r.map));
+	}
+	getTreeItem(node: MapNode) {
+		const item = new vscode.TreeItem(node.label, node.children.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
+		item.description = node.description;
+		item.tooltip = node.tooltip && new vscode.MarkdownString(node.tooltip);
+		item.contextValue = node.address !== undefined ? 'address' : undefined;
+		return item;
+	}
+}
+
+let memoryMap: MemoryMapProvider;
+let appTests: vscode.TestController;
+
+/** The apps in the Testing view, as in the Applications view: yours, then X-HEEP's examples. */
+function loadAppTests() {
+	const item = (app: string) => appTests.createTestItem(app, app, vscode.Uri.file(appDir(app)));
+	// Test ids cannot hold \0 (EXAMPLES): a / cannot appear in an app's folder name either.
+	const examples = appTests.createTestItem('examples/', 'Examples');
+	examples.children.replace(exampleApps().map(item));
+	appTests.items.replace([...userApps().map(item), examples]);
+}
+
+/**
+ * Runs apps on the simulation model of the active platform, as X-HEEP's app test does: an app passes when it
+ * exits with 0. Apps that test leaves out are skipped (with its reason), unless picked one by one.
+ */
+async function runAppTests(req: vscode.TestRunRequest, token: vscode.CancellationToken) {
+	const run = appTests.createTestRun(req);
+	const leaves = (items: vscode.TestItem[]): vscode.TestItem[] => items.flatMap(i => {
+		const children: vscode.TestItem[] = [];
+		i.children.forEach(c => children.push(c));
+		return children.length ? leaves(children) : [i];
+	});
+	const top: vscode.TestItem[] = [];
+	appTests.items.forEach(i => top.push(i));
+	const items = leaves([...req.include ?? top]).filter(i => !req.exclude?.includes(i) && i.id !== 'examples/');
+	const { skip, timeoutS } = appTestConfig(readText(path.join(root, 'test', 'test_apps', 'test_apps.py')));
+	items.forEach(i => run.enqueued(i));
+	if (!await prepare(options(undefined, 'sim'))) {
+		items.forEach(i => run.errored(i, new vscode.TestMessage('The platform or the simulation model did not build.')));
+		run.end();
+		return;
+	}
+	for (const item of items) {
+		const reason = skip.get(item.id);
+		if (token.isCancellationRequested || (reason && !req.include?.includes(item))) {
+			if (reason && !token.isCancellationRequested) {
+				run.appendOutput(`${item.id}: skipped, ${reason}\r\n`);
+			}
+			run.skipped(item);
+			continue;
+		}
+		run.started(item);
+		const start = Date.now();
+		const o = options(item.id, 'sim');
+		if (!await compile(o, true)) {
+			run.failed(item, new vscode.TestMessage('The app does not build: see the Problems panel.'), Date.now() - start);
+			continue;
+		}
+		const result = await runSim(o, text => run.appendOutput(text.replace(/\r?\n/g, '\r\n'), undefined, item), token, timeoutS * 1000);
+		if (!result) {
+			run.skipped(item);
+		} else if (result.ok) {
+			run.passed(item, Date.now() - start);
+		} else {
+			run.failed(item, new vscode.TestMessage(result.text), Date.now() - start);
+		}
+	}
+	run.end();
 }
 
 // --- Environment check ----------------------------------------------------
@@ -1686,6 +1964,7 @@ async function checkEnv(quiet = false) {
 		} else {
 			note(`Vivado (optional, Build Bitstream): ${hasVivado ? 'found' : 'not found'}`);
 		}
+		note(`Verible extension (optional, SystemVerilog lint, formatting, go to definition): ${vscode.extensions.getExtension(VERIBLE) ? 'installed' : `not installed (${VERIBLE})`}`);
 		// Loading bitstreams only matters in the FPGA modes: elsewhere a missing tool is a note, not a problem.
 		const tool = await programmer();
 		if (tool || fpga) {
@@ -1891,7 +2170,7 @@ class AppsProvider implements vscode.TreeDataProvider<string> {
 	private exampleCount = 0;
 	private emitter = new vscode.EventEmitter<void>();
 	readonly onDidChangeTreeData = this.emitter.event;
-	refresh() { loadExamples().then(() => this.emitter.fire()); }
+	refresh() { loadExamples().then(() => { this.emitter.fire(); loadAppTests(); }); }
 	getChildren(el?: string) {
 		if (el === EXAMPLES) {
 			return exampleApps();
@@ -1974,7 +2253,8 @@ export function activate(context: vscode.ExtensionContext) {
 	output = vscode.window.createOutputChannel('X-HEEP');
 	uart = vscode.window.createOutputChannel('X-HEEP UART');
 	buildProblems = vscode.languages.createDiagnosticCollection('xheep');
-	context.subscriptions.push(output, uart, buildProblems,
+	hdlProblemsCollection = vscode.languages.createDiagnosticCollection('xheep-rtl');
+	context.subscriptions.push(output, uart, buildProblems, hdlProblemsCollection,
 		vscode.commands.registerCommand('xheep.newProject', newProject),
 		vscode.commands.registerCommand('xheep.openInContainer', openInContainer));
 	// Either X-HEEP itself is open, or a software project with X-HEEP in x-heep/.
@@ -2000,6 +2280,11 @@ export function activate(context: vscode.ExtensionContext) {
 	// A build cut short by closing the window would otherwise spin forever.
 	state.update('buildStatus', Object.fromEntries(Object.entries(state.get<Record<string, BuildStatus>>('buildStatus', {})).filter(([, v]) => v !== 'running')));
 	apps = new AppsProvider();
+	memoryMap = new MemoryMapProvider();
+	appTests = vscode.tests.createTestController('xheep.apps', 'X-HEEP Apps');
+	appTests.refreshHandler = () => loadAppTests();
+	appTests.createRunProfile('Simulation', vscode.TestRunProfileKind.Run, runAppTests, true);
+	loadAppTests();
 
 	appItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
 	appItem.command = 'xheep.selectApp';
@@ -2016,13 +2301,33 @@ export function activate(context: vscode.ExtensionContext) {
 	runItem.tooltip = 'Run the X-HEEP application';
 	[appItem, modeItem, runItem, configItem].forEach(i => i.show());
 
+	// Saves come in bursts (Save All, format on save): one background rebuild for them.
+	let rebuildTimer: NodeJS.Timeout | undefined;
+	const onSave = (doc: vscode.TextDocument) => {
+		if (!isRtl(doc.uri.fsPath) || !cfg().get<boolean>('rebuildModelOnSave', true)) {
+			return;
+		}
+		const sim = cfg().get<Simulator>('simulator', 'verilator');
+		if (modelBuilds.has(sim)) {
+			savedDuringBuild.add(sim);
+		}
+		clearTimeout(rebuildTimer);
+		rebuildTimer = setTimeout(rebuildModelOnSave, 1000);
+	};
+	const onOpen = (doc: vscode.TextDocument) => isRtl(doc.uri.fsPath) && setupVerible(true);
+
 	const watchers = [...new Set([examplesDir(), userAppsDir()])].map(d => vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(d, '*')));
 	watchers.forEach(w => { w.onDidCreate(() => apps.refresh()); w.onDidDelete(() => apps.refresh()); });
 
 	context.subscriptions.push(
-		appItem, modeItem, runItem, configItem, ...watchers,
-		vscode.workspace.onDidChangeConfiguration(e => { if (e.affectsConfiguration('xheep.mcuConfig')) { refreshUi(); refreshPlatformEditor(); } }),
+		appItem, modeItem, runItem, configItem, ...watchers, appTests,
+		vscode.workspace.onDidChangeConfiguration(e => { if (e.affectsConfiguration('xheep.mcuConfig')) { refreshUi(); refreshPlatformEditor(); memoryMap.refresh(); } }),
+		vscode.workspace.onDidSaveTextDocument(onSave),
+		vscode.workspace.onWillSaveTextDocument(formatOnSave),
+		vscode.workspace.onDidOpenTextDocument(onOpen),
+		vscode.extensions.onDidChange(() => setupVerible(false)),
 		vscode.window.registerTreeDataProvider('xheep.apps', apps),
+		vscode.window.registerTreeDataProvider('xheep.memoryMap', memoryMap),
 		vscode.debug.registerDebugAdapterTrackerFactory('cppdbg', { createDebugAdapterTracker: exitTracker }),
 		vscode.commands.registerCommand('xheep.selectApp', selectApp),
 		vscode.commands.registerCommand('xheep.selectMode', selectMode),
@@ -2044,11 +2349,15 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('xheep.checkEnv', () => checkEnv()),
 		vscode.commands.registerCommand('xheep.fixTools', fixTools),
 		vscode.commands.registerCommand('xheep.refreshApps', () => apps.refresh()),
+		vscode.commands.registerCommand('xheep.openWaves', openWaves),
+		vscode.commands.registerCommand('xheep.refreshMemoryMap', () => memoryMap.refresh()),
+		vscode.commands.registerCommand('xheep.copyAddress', (node: MapNode) => vscode.env.clipboard.writeText(hexAddress(node.address!))),
 	);
 
 	refreshUi();
 	jtagAdapter(false).then(refreshUi); // for the status bar
 	setupIntelliSense();
+	setupVerible(vscode.workspace.textDocuments.some(d => isRtl(d.uri.fsPath)));
 	checkEnv(true);
 }
 

@@ -1,9 +1,27 @@
 # Change Log
 
-## 0.3.1
+## 0.4.0
+
+- Works with VS Code 1.92 and later (was 1.140), e.g. the older VS Code of Ubuntu's packages.
+
+### Hardware development
+
+- The simulation model is rebuilt in the background when an RTL file in `hw/` or `tb/` is saved, and a run never
+  uses a model older than the RTL (`xheep.rebuildModelOnSave`).
+- Verilator and Questasim errors of the model build go to the Problems panel, with warnings only outside vendored IPs.
+- **Open Waveform**: the `waveform.fst` of the last Verilator run, in Surfer or GTKWave.
+- SystemVerilog with the Verible extension: lint, go to definition across modules (from a `verible.filelist` of the
+  model's files), and formatting on save as X-HEEP's `util/format-verible` does, only in the folders it covers
+  (`xheep.formatRtlOnSave`).
+- **Memory Map** view: RAM, address regions, peripherals and their registers and fields, with addresses to copy.
+- App regression in the Testing view: the apps on the active platform's simulation model, skipping those X-HEEP's
+  app test leaves out.
+
+### Environment
 
 - Check Environment and Set Up Tools share one list of checks: the report and its **Fix…** button always agree.
-- Set Up Tools also handles verible (the version X-HEEP uses) and offers X-HEEP's Verilator version when another one is installed.
+- Set Up Tools also handles verible (the version X-HEEP uses) and offers X-HEEP's Verilator version when another one
+  is installed.
 - With the environment OK, **Change a Tool…** switches a working tool (another toolchain, Verilator, the container).
 - A disconnected FPGA board is a note, not an environment problem: simulation-only is the norm.
 

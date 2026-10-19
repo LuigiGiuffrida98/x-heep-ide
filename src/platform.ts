@@ -20,6 +20,51 @@ export interface Platform {
 	userPeripherals: string[];
 }
 
+/** Where everything is on the platform (media/platform.py map), with the peripherals' registers from regtool. */
+export interface AddressMap {
+	banks: AddressRange[];
+	regions: AddressRange[];
+	domains: (AddressRange & { peripherals: (AddressRange & { registers: Register[] })[] })[];
+}
+
+export interface AddressRange { name: string; start: number; length: number }
+
+export interface Register {
+	name: string;
+	offset: number;
+	desc: string;
+	access?: string;
+	reset?: number;
+	/** A memory window (e.g. a FIFO) of this many bytes, not a register. */
+	window?: number;
+	fields: { name: string; msb: number; lsb: number; access: string; desc: string }[];
+}
+
+/** A row of the Memory Map view: `address` is what Copy Address copies. */
+export interface MapNode { label: string; description: string; tooltip?: string; address?: number; children: MapNode[] }
+
+export const hexAddress = (n: number) => `0x${n.toString(16).padStart(8, '0')}`;
+const size = (bytes: number) => bytes >= 1 << 20 ? `${bytes / (1 << 20)} MB` : bytes >= 1024 ? `${bytes / 1024} KB` : `${bytes} B`;
+
+/** The Memory Map view's tree: RAM, then the address regions in address order, peripherals with registers and fields. */
+export function mapNodes(map: AddressMap): MapNode[] {
+	const range = (r: AddressRange, children: MapNode[] = []): MapNode =>
+		({ label: r.name, description: `${hexAddress(r.start)} · ${size(r.length)}`, address: r.start, children });
+	const register = (base: number, r: Register): MapNode => ({
+		label: r.name,
+		description: `${hexAddress(base + r.offset)} · ${r.window ? `window, ${size(r.window)}` : r.access}`,
+		tooltip: `${r.desc}${r.reset !== undefined && !r.window ? `\n\nReset: 0x${r.reset.toString(16)}` : ''}`,
+		address: base + r.offset,
+		children: r.fields.map(f => ({ label: f.name, description: `[${f.msb === f.lsb ? f.msb : `${f.msb}:${f.lsb}`}] ${f.access}`, tooltip: f.desc, children: [] })),
+	});
+	const ram = map.banks.reduce((n, b) => n + b.length, 0);
+	return [
+		{ label: 'RAM', description: `${hexAddress(map.banks[0]?.start ?? 0)} · ${size(ram)}`, address: map.banks[0]?.start, children: map.banks.map(b => range(b)) },
+		...[...map.regions.map(r => range(r)), ...map.domains.map(d => range(d, d.peripherals.map(p => range(p, p.registers.map(r => register(p.start, r))))))]
+			.sort((a, b) => a.address! - b.address!),
+	];
+}
+
 export interface Catalog {
 	cpus: string[];
 	userPeripherals: { name: string; cls: string; doc: string }[];

@@ -26,6 +26,24 @@ Click the configuration in the status bar to pick a configuration, or to create 
 experimental editor. The editor is a form for CPU, bus, memory and peripherals. It saves a small Python file on
 top of the configuration you started from, and never edits the original.
 
+## Hardware development
+
+For changes to the X-HEEP RTL:
+
+- **Model kept up to date**: saving an RTL file in `hw/` or `tb/` rebuilds the simulation model in the background
+  (`xheep.rebuildModelOnSave`), and a run never uses a model older than the RTL. Verilator and Questasim errors,
+  and warnings outside vendored IPs, go to the Problems panel.
+- **Waveforms**: **Open Waveform** opens the `waveform.fst` of the last Verilator run in
+  [Surfer](https://marketplace.visualstudio.com/items?itemName=surfer-project.surfer), or in GTKWave.
+- **SystemVerilog editing** with the [Verible](https://marketplace.visualstudio.com/items?itemName=chipsalliance.verible)
+  extension: lint, go to definition across modules (the extension writes `verible.filelist` from the model's
+  files), and formatting on save as X-HEEP's `util/format-verible` does, only in the folders it covers
+  (`xheep.formatRtlOnSave`).
+- **Memory Map** view: RAM, address regions, peripherals, and their registers and fields from the regtool
+  descriptions, with absolute addresses to copy.
+- **App regression** in the Testing view: runs the apps on the simulation model of the active platform. An app
+  passes when it exits with 0. Apps X-HEEP's own app test leaves out are skipped, unless you run them one by one.
+
 ## FPGA
 
 Officially supported boards: **PYNQ-Z2** and **AUP-ZU3**.

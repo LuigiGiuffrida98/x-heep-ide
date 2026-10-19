@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import { veribleInstallCommand } from '../tools';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -7,7 +8,7 @@ import { changedFiles, isGenerated, updateCommand, Options, buildCommand, simCom
 	builtBitstream, bitstreamBuildCommand, vivadoTcl, openocdFpgaCommand, fileSha1,
 	gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
-	condaEnvName, requiredVersions, verilatorVersion, veribleVersion, veribleInstallCommands, usbDevices, udevRule, missingModulesCommand,
+	condaEnvName, requiredVersions, verilatorVersion, veribleVersion, usbDevices, udevRule, missingModulesCommand,
 	boardAdapters, pickAdapter } from '../xheep';
 
 const base: Options = { project: 'hello_world', mode: 'sim', compiler: 'gcc', board: 'pynq-z2', simulator: 'verilator' };
@@ -231,7 +232,7 @@ suite('Environment check', () => {
 		assert.strictEqual(verilatorVersion('Verilator 5.040 2025-08-30 rev v5.040\n'), '5.040');
 		assert.strictEqual(veribleVersion('Version\tv0.0-4023-gc1271a00\nCommit-Timestamp\t2025-08-29T09:25:59Z\n'), 'v0.0-4023-gc1271a00');
 		assert.strictEqual(veribleVersion('v0.0-1824-ga3b5bedf\nCommit\t2022-01-14 23:24:43 -0800\n'), 'v0.0-1824-ga3b5bedf');
-		assert.ok(veribleInstallCommands('v0.0-4023-gc1271a00')[0].endsWith('/v0.0-4023-gc1271a00/verible-v0.0-4023-gc1271a00-linux-static-x86_64.tar.gz'));
+		assert.ok(veribleInstallCommand('v0.0-4023-gc1271a00').includes('/v0.0-4023-gc1271a00/verible-v0.0-4023-gc1271a00-linux-static-x86_64.tar.gz'));
 	});
 
 	test('checks the Python packages in the environment python', () => {

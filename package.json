@@ -12,7 +12,7 @@
     "url": "https://github.com/LuigiGiuffrida98/x-heep-ide/issues"
   },
   "preview": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "engines": {
     "vscode": "^1.92.0"
   },
@@ -269,11 +269,6 @@
           "group": "4_help@1"
         },
         {
-          "command": "xheep.fixTools",
-          "when": "view == xheep.apps && xheep.active",
-          "group": "4_help@2"
-        },
-        {
           "command": "xheep.openInContainer",
           "when": "view == xheep.apps",
           "group": "4_help@3"
@@ -502,6 +497,12 @@
           "default": "",
           "scope": "machine",
           "markdownDescription": "Verilator executable (or its folder). Empty: `verilator` from PATH. Set by **X-HEEP: Set Up Tools**."
+        },
+        "xheep.veriblePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "verible-verilog-format executable (or its folder), used by platform generation. Empty: from PATH. Set by **X-HEEP: Set Up Tools**."
         },
         "xheep.picocomPath": {
           "type": "string",

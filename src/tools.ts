@@ -119,6 +119,17 @@ export function verilatorInstallCommand(version: string): string {
 		+ 's=$?; rm -rf "$d"; exit $s';
 }
 
+/** Where X-HEEP's setup guide installs verible. */
+export const veriblePrefix = (version: string) => path.join(HOME, 'tools', 'verible', version);
+
+/** Downloads verible's static Linux release into veriblePrefix, as X-HEEP's setup guide does. */
+export function veribleInstallCommand(version: string): string {
+	const dir = `verible-${version}`;
+	return `d=$(mktemp -d) && cd "$d" && wget -q https://github.com/chipsalliance/verible/releases/download/${version}/${dir}-linux-static-x86_64.tar.gz `
+		+ `&& tar -xf ${dir}-linux-static-x86_64.tar.gz && mkdir -p '${veriblePrefix(version)}' && cp -r ${dir}/* '${veriblePrefix(version)}/'; `
+		+ 's=$?; rm -rf "$d"; exit $s';
+}
+
 /** Shell command installing a system tool with the platform's package manager, if there is one. */
 export function packageInstallCommand(pkg: string, platform = process.platform, brew = findExecutables('brew')[0]): string | undefined {
 	if (platform === 'darwin') {

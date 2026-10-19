@@ -1,5 +1,12 @@
 # Change Log
 
+## 0.3.1
+
+- Check Environment and Set Up Tools share one list of checks: the report and its **Fix…** button always agree.
+- Set Up Tools also handles verible (the version X-HEEP uses) and offers X-HEEP's Verilator version when another one is installed.
+- With the environment OK, **Change a Tool…** switches a working tool (another toolchain, Verilator, the container).
+- A disconnected FPGA board is a note, not an environment problem: simulation-only is the norm.
+
 ## 0.2.0
 
 - Tested with X-HEEP [8759d1b](https://github.com/x-heep/x-heep/commit/8759d1b4760c95f7bcc0490afb27b7f41960aabd).

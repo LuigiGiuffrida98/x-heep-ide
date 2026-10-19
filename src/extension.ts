@@ -7,7 +7,7 @@ import { execFile, spawn } from 'child_process';
 import { createHash } from 'crypto';
 import {
 	findExecutables, findToolchains, findPythonEnvs, findConda, condaSetup, venvSetup,
-	xheepVerilatorVersion, verilatorPrefix, verilatorInstallCommand,
+	xheepVerilatorVersion, verilatorPrefix, verilatorInstallCommand, veriblePrefix, veribleInstallCommand,
 	toolchainUrl, toolchainInstallCommand, packageInstallCommand, devcontainerJson, xheepImageTag,
 } from './tools';
 import { Mode, MODES, JTAG_ADAPTERS, Adapter, boardAdapters, pickAdapter, Options, Simulator, SIM_MODEL, buildCommand, simCommand, simModelBuildCommand, FLASH_COMMAND, mcuGenCommand, simSummary, incrementalBuildCommand, verilatorRunCommand,
@@ -16,7 +16,7 @@ import { Mode, MODES, JTAG_ADAPTERS, Adapter, boardAdapters, pickAdapter, Option
 	Programmer, BOARDS, BitstreamInfo, fileSha1, builtBitstream, bitstreamBuildCommand, vivadoTcl, vivadoCommand, openocdFpgaCommand,
 	EXIT_BREAKPOINT, gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	linkerScript, memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
-	SETUP_GUIDE, missingModulesCommand, condaEnvName, requiredVersions, verilatorVersion, veribleVersion, veribleInstallCommands,
+	SETUP_GUIDE, missingModulesCommand, condaEnvName, requiredVersions, verilatorVersion, veribleVersion,
 	usbDevices, udevRule, EPFL_PROGRAMMER_USB, platformScriptCommand, largestFrame } from './xheep';
 import { Platform, Catalog, PlatformForm, formFromPlatform, plainMemory, hardwareFingerprint, archFor, overlayConfig, overlayHeader } from './platform';
 import { EditorState, openPlatformEditor, refreshPlatformEditor } from './platformEditor';
@@ -96,7 +96,7 @@ function toolExe(key: string, name: string): string {
 
 /** Folders of the tools set in the settings, put first in PATH for every command the extension runs. */
 function toolDirs(): string[] {
-	return [toolExe('verilatorPath', 'verilator'), toolExe('openocdPath', 'openocd'), toolExe('picocomPath', 'picocom')]
+	return [toolExe('verilatorPath', 'verilator'), toolExe('veriblePath', 'verible-verilog-format'), toolExe('openocdPath', 'openocd'), toolExe('picocomPath', 'picocom')]
 		.filter(p => path.isAbsolute(p)).map(p => path.dirname(p)).concat(path.join(toolchain(), 'bin'));
 }
 
@@ -1490,18 +1490,81 @@ function mcuGen() {
 
 // --- Environment check ----------------------------------------------------
 
-type ToolId = 'python' | 'toolchain' | 'verilator' | 'openocd' | 'picocom';
-interface Check { id: ToolId; label: string; usedBy: string; ok: boolean }
+type ToolId = 'python' | 'toolchain' | 'verilator' | 'verible' | 'openocd' | 'picocom';
 
-async function runChecks(): Promise<Check[]> {
+/** One tool, as the environment check reports it and Set Up Tools fixes it. */
+interface Check {
+	id: ToolId;
+	label: string;
+	usedBy: string;
+	state: 'ok' | 'warn' | 'fail';
+	/** What was found, e.g. "Verilator 5.040". */
+	text: string;
+	/** What is wrong and what to do, when not ok. */
+	hint?: string;
+	/** Needed in the current mode: OpenOCD only on the FPGA, picocom never (the UART panel does without). */
+	needed: boolean;
+}
+
+/**
+ * The tools X-HEEP needs, checked in depth: the Python environment runs and has X-HEEP's packages, Verilator and
+ * verible are the versions X-HEEP's setup guide uses. The environment check reports them; Set Up Tools fixes them.
+ */
+async function toolChecks(): Promise<Check[]> {
+	const fpga = currentMode() !== 'sim';
+	const found = async (cmd: string) => (await shOut(`command -v ${cmd}`, true)).ok;
+	const wanted = requiredVersions(readText(path.join(root, 'docs', 'source', 'GettingStarted', 'Setup.md')));
+	const version = (what: string, got: string | undefined, want: string | undefined, why: string): Pick<Check, 'state' | 'text' | 'hint'> =>
+		!got ? { state: 'fail', text: what, hint: `not found: install ${what} ${want ?? ''}`.trim() }
+			: want && got !== want ? { state: 'warn', text: `${what} ${got}`, hint: `X-HEEP uses ${want}: ${why}` }
+				: { state: 'ok', text: `${what} ${got}` };
+
 	const questa = cfg().get<Simulator>('simulator', 'verilator') === 'questasim';
+	const sim: Pick<Check, 'label' | 'state' | 'text' | 'hint'> = questa
+		? { label: 'Questasim', ...(await found('vsim') ? { state: 'ok', text: 'Questasim (vsim)' } : { state: 'fail', text: 'Questasim (vsim)', hint: 'vsim is not on PATH' }) }
+		: { label: 'Verilator', ...version('Verilator', verilatorVersion((await shOut(`'${toolExe('verilatorPath', 'verilator')}' --version`, true)).out), wanted.verilator, 'others may fail to build the simulation model') };
+	const gcc = findTool('-elf-gcc'), gdb = findTool('-elf-gdb');
 	return [
-		{ id: 'python', label: 'Python environment (fusesoc)', usedBy: 'every build', ok: await sh('command -v fusesoc') },
-		{ id: 'toolchain', label: 'RISC-V toolchain', usedBy: 'compiling and debugging apps', ok: !!findTool('-elf-gcc') && !!findTool('-elf-gdb') },
-		{ id: 'verilator', label: questa ? 'Questasim (vsim)' : 'Verilator', usedBy: 'Simulation', ok: await sh(`command -v ${questa ? 'vsim' : 'verilator'}`, false) },
-		{ id: 'openocd', label: 'OpenOCD', usedBy: 'debugging', ok: await sh(`command -v '${toolExe('openocdPath', 'openocd')}'`, false) },
-		{ id: 'picocom', label: 'picocom', usedBy: 'the FPGA serial output', ok: await sh(`command -v '${toolExe('picocomPath', 'picocom')}'`, false) },
+		{ id: 'python', label: 'Python environment', usedBy: 'every build', needed: true, ...await pythonCheck() },
+		{
+			id: 'toolchain', label: 'RISC-V toolchain', usedBy: 'compiling and debugging apps', needed: true,
+			...(gcc && gdb ? { state: 'ok', text: `RISC-V toolchain in ${toolchain()}` }
+				: { state: 'fail', text: `RISC-V toolchain in ${toolchain()}`, hint: gcc ? 'no GDB in it' : 'no *-elf-gcc in it' }),
+		},
+		{ id: 'verilator', usedBy: 'Simulation', needed: true, ...sim },
+		{
+			id: 'verible', label: 'verible', usedBy: 'generating the platform', needed: true,
+			...version('verible', veribleVersion((await shOut(`'${toolExe('veriblePath', 'verible-verilog-format')}' --version`, true)).out), wanted.verible,
+				'platform generation would reformat X-HEEP\'s own files differently (they show as modified)'),
+		},
+		{
+			id: 'openocd', label: 'OpenOCD', usedBy: 'the FPGA modes', needed: fpga,
+			...(await found(`'${toolExe('openocdPath', 'openocd')}'`) ? { state: 'ok', text: 'OpenOCD' } : { state: 'fail', text: 'OpenOCD', hint: 'not found' }),
+		},
+		{
+			id: 'picocom', label: 'picocom', usedBy: 'Open Serial Monitor (optional)', needed: false,
+			...(await found(`'${toolExe('picocomPath', 'picocom')}'`) ? { state: 'ok', text: 'picocom' } : { state: 'fail', text: 'picocom', hint: 'not found' }),
+		},
 	];
+}
+
+/** The Python environment: that `xheep.envSetup` runs, and why not (no conda, no such environment), then X-HEEP's packages. */
+async function pythonCheck(): Promise<Pick<Check, 'state' | 'text' | 'hint'>> {
+	const setup = cfg().get<string>('envSetup', '').trim();
+	const text = `Python environment: ${setup || 'the repository .venv'}`;
+	const env = await shOut('true');
+	if (!env.ok) {
+		const name = condaEnvName(setup);
+		const conda = !name || (await shOut('command -v conda', true)).ok;
+		const envs = conda && name ? (await shOut('conda env list', true)).out.split('\n').map(l => l.split(/\s+/)[0]) : [];
+		return {
+			state: 'fail', text, hint: !conda ? 'conda is not on PATH'
+				: name && !envs.includes(name) ? `there is no conda environment "${name}"` : `it fails: ${env.out.trim().split('\n').pop()}`,
+		};
+	}
+	const missing = (await shOut(missingModulesCommand())).out.trim().split('\n').pop()?.trim();
+	return missing ? { state: 'fail', text, hint: `it lacks X-HEEP's Python packages (${missing.split(' ').join(', ')})` }
+		: { state: 'ok', text: `${text} (X-HEEP's packages present)` };
 }
 
 /** Vivado is on PATH and starts: enables "Build Bitstream", which is the only thing that needs it. */
@@ -1517,83 +1580,6 @@ const canUse = (node: string) => { try { fs.accessSync(node, fs.constants.R_OK |
 
 type Report = (state: 'ok' | 'fail' | 'warn', what: string, hint?: string) => void;
 type AddFix = (label: string, run: () => unknown) => void;
-
-/**
- * The Python environment: that `xheep.envSetup` runs, and why not (no conda, no such environment), then that it
- * has X-HEEP's packages. True when the tools can be looked for in it.
- */
-async function checkPython(report: Report, addFix: AddFix): Promise<boolean> {
-	const setup = cfg().get<string>('envSetup', '').trim();
-	const what = `Python environment: ${setup || 'the repository .venv'}`;
-	const name = condaEnvName(setup);
-	const condaEnvs = async () => (await shOut('conda env list', true)).out.split('\n').map(l => l.split(/\s+/)[0]);
-	const createEnv = () => runTask(makeTask('make conda', 'make conda', true)).then(async () => {
-		// make conda creates "x-heep": point the extension at it when the setup activated another one.
-		if (name !== 'x-heep') {
-			await cfg().update('envSetup', undefined, vscode.ConfigurationTarget.Workspace);
-		}
-		checkEnv();
-	});
-	const env = await shOut('true');
-	if (!env.ok) {
-		const conda = !name || (await shOut('command -v conda', true)).ok;
-		const envs = conda && name ? await condaEnvs() : [];
-		report('fail', what, !conda ? 'conda is not on PATH: install Miniconda (setup guide, step 2.a), or create a venv with "make venv" and empty "xheep.envSetup"'
-			: name && !envs.includes(name) ? `there is no conda environment "${name}": create X-HEEP's with "make conda"`
-				: `it fails: ${env.out.trim().split('\n').pop()}`);
-		if (conda) {
-			addFix('Create Environment', createEnv);
-		}
-		if (name && name !== 'x-heep' && envs.includes('x-heep')) {
-			addFix('Use the x-heep Environment', () => cfg().update('envSetup', undefined, vscode.ConfigurationTarget.Workspace).then(() => checkEnv()));
-		}
-		return false;
-	}
-	const missing = (await shOut(missingModulesCommand())).out.trim().split('\n').pop()?.trim();
-	if (missing) {
-		report('fail', what, `it lacks X-HEEP's Python packages (${missing.split(' ').join(', ')}): run "make conda" and activate the "x-heep" environment`);
-		addFix(name === 'x-heep' ? 'Update Environment' : 'Create Environment', createEnv);
-	} else {
-		report('ok', `${what} (X-HEEP's packages present)`);
-	}
-	return true;
-}
-
-/** Verilator and verible, the HDL tools mcu-gen and the simulation need, against the versions X-HEEP's setup guide uses. */
-async function checkHdlTools(report: Report, note: (text: string) => void, addFix: AddFix) {
-	const wanted = requiredVersions(readText(path.join(root, 'docs', 'source', 'GettingStarted', 'Setup.md')));
-	const guide = () => addFix('Open Setup Guide', () => vscode.env.openExternal(vscode.Uri.parse(SETUP_GUIDE)));
-	if (cfg().get<Simulator>('simulator', 'verilator') === 'questasim') {
-		report((await shOut('command -v vsim')).ok ? 'ok' : 'fail', 'Questasim (Simulation)', 'vsim is not on PATH');
-	} else {
-		const v = await shOut('verilator --version');
-		const version = v.ok ? verilatorVersion(v.out) : undefined;
-		if (!version) {
-			report('fail', 'Verilator (Simulation)', `not on PATH: install Verilator ${wanted.verilator ?? ''} (setup guide, step 4)`);
-			guide();
-		} else if (wanted.verilator && version !== wanted.verilator) {
-			report('warn', `Verilator ${version} (Simulation)`, `X-HEEP is tested with ${wanted.verilator}; others may fail to build the model (setup guide, step 4)`);
-			guide();
-		} else {
-			report('ok', `Verilator ${version} (Simulation)`);
-		}
-	}
-	// mcu-gen ends formatting the generated RTL with verible: without it the platform never counts as generated.
-	const f = await shOut('verible-verilog-format --version');
-	const version = f.ok ? veribleVersion(f.out) : undefined;
-	const install = () => wanted.verible && veribleInstallCommands(wanted.verible).forEach(c => note(`    ${c}`));
-	if (!version) {
-		report('fail', 'verible (formats the generated platform)', `not on PATH, so platform generation fails: install verible ${wanted.verible ?? ''} (setup guide, step 5):`);
-		install();
-		guide();
-	} else if (wanted.verible && version !== wanted.verible) {
-		report('warn', `verible ${version}`, `X-HEEP uses ${wanted.verible}: platform generation would reformat X-HEEP's own files differently (they show as modified). Install it with:`);
-		install();
-		guide();
-	} else {
-		report('ok', `verible ${version}`);
-	}
-}
 
 /**
  * What the FPGA modes need from the hardware: the JTAG adapter, the flash programmer and the board's USB usable
@@ -1661,13 +1647,21 @@ async function checkEnv(quiet = false) {
 	const note = (text: string) => lines.push(`  ${text}`);
 	const addFix: AddFix = (label, run) => { if (!fixes.some(f => f.label === label)) { fixes.push({ label, run }); } };
 
-	const envOk = await checkPython(report, addFix);
-
-	const gcc = findTool('-elf-gcc');
-	report(gcc ? 'ok' : 'fail', `RISC-V toolchain in ${toolchain()}`, 'install the CORE-V GCC toolchain (setup guide, step 3) and set "xheep.riscvToolchain" or RISCV_XHEEP');
-	report(findTool('-elf-gdb') ? 'ok' : 'fail', 'RISC-V GDB');
-	if (!gcc) {
-		addFix('Set Toolchain Path', () => vscode.commands.executeCommand('workbench.action.openSettings', 'xheep.riscvToolchain'));
+	const tools = await toolChecks();
+	for (const c of tools) {
+		if (c.state === 'ok') {
+			report('ok', c.text);
+		} else if (c.needed) {
+			report(c.state, c.text, c.hint);
+		} else {
+			note(`${c.text}: ${c.hint} (needed for ${c.usedBy})`);
+		}
+	}
+	const envOk = tools.find(c => c.id === 'python')?.state === 'ok';
+	// Set Up Tools finds, installs or replaces the tools that need it.
+	if (tools.some(c => c.state !== 'ok' && c.needed)) {
+		addFix('Fix…', () => fixTools(false));
+		addFix('Open Setup Guide', () => vscode.env.openExternal(vscode.Uri.parse(SETUP_GUIDE)));
 	}
 
 	if (managedXheep()) {
@@ -1682,17 +1676,7 @@ async function checkEnv(quiet = false) {
 	note(`Platform config: ${configPath()} (${platformReady() ? 'generated' : 'regenerated on the next build'})`);
 
 	if (envOk) {
-		await checkHdlTools(report, note, addFix);
 		const fpga = currentMode() !== 'sim';
-		if (await sh(`command -v '${toolExe('openocdPath', 'openocd')}'`, false)) {
-			report('ok', 'OpenOCD (FPGA modes)');
-		} else if (fpga) {
-			report('fail', 'OpenOCD (FPGA modes)', 'not on PATH: sudo apt install openocd');
-		} else {
-			note('OpenOCD: not found, needed in the FPGA modes (sudo apt install openocd)');
-		}
-		note(`picocom (optional, Open Serial Monitor): ${await sh(`command -v '${toolExe('picocomPath', 'picocom')}'`, false) ? 'found' : 'not found (sudo apt install picocom, or X-HEEP: Set Up Tools)'}`);
-
 		// Vivado is optional (building bitstreams), but a broken install would fail every FPGA load through it.
 		const vivadoOnPath = await sh('command -v vivado');
 		hasVivado = vivadoOnPath && await sh('vivado -version');
@@ -1718,12 +1702,6 @@ async function checkEnv(quiet = false) {
 		}
 	}
 
-	// Missing tools: Set Up Tools finds or installs them. OpenOCD only matters on the FPGA, picocom never blocks.
-	const fpgaMode = currentMode() !== 'sim';
-	if ((await runChecks()).some(c => !c.ok && c.id !== 'picocom' && (fpgaMode || c.id !== 'openocd'))) {
-		fixes.unshift({ label: 'Fix…', run: fixTools });
-	}
-
 	output.appendLine(`X-HEEP environment check (${root})`);
 	lines.forEach(l => output.appendLine(l));
 	if (counts.fail || counts.warn) {
@@ -1734,21 +1712,29 @@ async function checkEnv(quiet = false) {
 		}
 		fixes.find(f => f.label === choice)?.run();
 	} else if (!quiet) {
-		vscode.window.showInformationMessage('X-HEEP: environment OK.');
+		if (await vscode.window.showInformationMessage('X-HEEP: environment OK.', 'Change a Tool…')) {
+			fixTools(true);
+		}
 	}
 }
 
-/** Walks the user through each missing tool until all are found or they give up. */
-async function fixTools() {
+/**
+ * Walks the user through the tools that need it, until all are fine or they give up; with `all`, offers every
+ * tool, to change one that works (another toolchain, another Verilator, the container).
+ */
+async function fixTools(all = false) {
 	for (; ;) {
-		const missing = (await runChecks()).filter(c => !c.ok);
-		if (!missing.length) {
+		const tools = await toolChecks();
+		const pending = all ? tools : tools.filter(c => c.state !== 'ok' && c.needed);
+		if (!pending.length) {
 			vscode.window.showInformationMessage('X-HEEP: all tools found.');
 			return;
 		}
-		const picked = await vscode.window.showQuickPick(missing.map(c => ({ label: c.label, detail: `Needed for ${c.usedBy}`, c })),
-			{ placeHolder: 'X-HEEP: which tool do you want to set up?' });
-		if (!picked || !await fixTool(picked.c)) {
+		const icon = { ok: '$(pass)', warn: '$(warning)', fail: '$(error)' };
+		const picked = await vscode.window.showQuickPick(pending.map(c => ({
+			label: `${icon[c.state]} ${c.label}`, description: c.state === 'ok' ? c.text : c.hint, detail: `Needed for ${c.usedBy}`, c,
+		})), { placeHolder: all ? 'X-HEEP: which tool do you want to change?' : 'X-HEEP: which tool do you want to set up?' });
+		if (!picked || !await fixTool(picked.c) || all) {
 			return;
 		}
 	}
@@ -1760,7 +1746,8 @@ const setGlobal = (key: string, value: string) => cfg().update(key, value, vscod
 async function fixTool(c: Check): Promise<boolean> {
 	type Action = vscode.QuickPickItem & { run?: () => Thenable<unknown> | Promise<unknown> };
 	const sep = (label: string): Action => ({ label, kind: vscode.QuickPickItemKind.Separator });
-	const settingFor: Partial<Record<ToolId, string>> = { verilator: 'verilatorPath', openocd: 'openocdPath', picocom: 'picocomPath' };
+	const settingFor: Partial<Record<ToolId, string>> = { verilator: 'verilatorPath', verible: 'veriblePath', openocd: 'openocdPath', picocom: 'picocomPath' };
+	const exe = c.id === 'verible' ? 'verible-verilog-format' : c.id;
 	let found: Action[] = [];
 	let locate: Action | undefined;
 	let install: { cmd: string; done: () => Thenable<unknown>; note?: string } | undefined;
@@ -1794,11 +1781,11 @@ async function fixTool(c: Check): Promise<boolean> {
 		}
 	} else if (settingFor[c.id]) {
 		const key = settingFor[c.id]!;
-		found = findExecutables(c.id).map(p => ({ label: p, run: () => setGlobal(key, p) }));
+		found = findExecutables(exe).map(p => ({ label: p, run: () => setGlobal(key, p) }));
 		locate = {
-			label: '$(folder-opened) Locate…', detail: `The ${c.id} executable`,
+			label: '$(folder-opened) Locate…', detail: `The ${exe} executable`,
 			run: async () => {
-				const p = (await vscode.window.showOpenDialog({ canSelectFiles: true, openLabel: `Use this ${c.id}` }))?.[0]?.fsPath;
+				const p = (await vscode.window.showOpenDialog({ canSelectFiles: true, openLabel: `Use this ${exe}` }))?.[0]?.fsPath;
 				return p && setGlobal(key, p);
 			},
 		};
@@ -1811,6 +1798,16 @@ async function fixTool(c: Check): Promise<boolean> {
 				note: `Builds Verilator ${version} from source into ${verilatorPrefix(version)}, as in X-HEEP's setup guide. `
 					+ 'Needs git, autoconf, flex, bison and g++ 13 or newer, and takes several minutes.',
 			};
+		} else if (c.id === 'verible') {
+			// The release X-HEEP formats its sources with: another one reformats them differently.
+			const version = requiredVersions(readText(path.join(root, 'docs', 'source', 'GettingStarted', 'Setup.md'))).verible;
+			if (version) {
+				install = {
+					cmd: veribleInstallCommand(version),
+					done: () => setGlobal(key, path.join(veriblePrefix(version), 'bin', 'verible-verilog-format')),
+					note: `Downloads verible ${version} into ${veriblePrefix(version)}, as in X-HEEP's setup guide.`,
+				};
+			}
 		} else {
 			const cmd = packageInstallCommand(c.id);
 			if (cmd) {

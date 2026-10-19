@@ -182,16 +182,6 @@ export const verilatorVersion = (out: string) => /Verilator (\d+\.\d+)/.exec(out
 /** `verible-verilog-format --version`: "Version v0.0-4023-gc1271a00 ..." -> v0.0-4023-gc1271a00. */
 export const veribleVersion = (out: string) => /v\d+\.\d+-\d+-g[0-9a-f]+/.exec(out)?.[0];
 
-/** Setup guide commands installing verible `version` under ~/tools, as X-HEEP's Setup.md does. */
-export function veribleInstallCommands(version: string): string[] {
-	const dir = `verible-${version}`;
-	return [
-		`wget https://github.com/chipsalliance/verible/releases/download/${version}/${dir}-linux-static-x86_64.tar.gz`,
-		`tar -xf ${dir}-linux-static-x86_64.tar.gz && mkdir -p ~/tools/verible/${version} && mv ${dir}/* ~/tools/verible/${version}/`,
-		`export PATH=~/tools/verible/${version}/bin:$PATH   # also in ~/.bashrc or ~/.zshrc`,
-	];
-}
-
 export interface UsbDevice { vid: string; pid: string; product?: string; node: string }
 
 /** USB devices from sysfs (no lsusb needed), with their /dev/bus/usb node, whose permissions OpenOCD and iceprog need. */

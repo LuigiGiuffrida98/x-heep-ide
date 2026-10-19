@@ -1,5 +1,14 @@
 # Change Log
 
+## 0.5.0
+
+- **New Hardware Project**: a new repo from gr-heep, to extend X-HEEP with your own hardware, renamed after
+  the folder (files, SystemVerilog modules, fusesoc core, C header).
+- Works in gr-heep and its forks (X-HEEP vendored in `hw/vendor/x-heep`): platform generation, simulation models and
+  bitstreams through the project's Makefile, configuration from `config/`.
+- **Memory Map**: Copy Address copies the C define (`UART_START_ADDRESS + UART_CTRL_REG_OFFSET`), not the hex value.
+  The map also reads the older X-HEEP that gr-heep vendors.
+
 ## 0.4.0
 
 - Works with VS Code 1.92 and later (was 1.140), e.g. the older VS Code of Ubuntu's packages.

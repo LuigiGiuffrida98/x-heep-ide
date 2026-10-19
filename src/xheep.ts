@@ -1,11 +1,14 @@
 // Helpers that turn the user's choices into X-HEEP commands and files.
 // Kept free of the vscode API so the unit tests and the end-to-end test (src/test/e2e.ts) share them.
 
+import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
 export const XHEEP_GIT = 'https://github.com/x-heep/x-heep.git';
+/** Template of a hardware project extending X-HEEP, which it vendors in hw/vendor/x-heep. */
+export const GRHEEP_GIT = 'https://github.com/x-heep/gr-heep.git';
 
 /**
  * The last X-HEEP commit the extension is known to work with. The X-HEEP canary workflow updates this file
@@ -40,6 +43,54 @@ export const isGenerated = (xheep: string, file: string) => fs.existsSync(path.j
 export function updateCommand(ref: string, discard: string[] = []): string {
 	const restore = discard.length ? `git checkout -q -- ${discard.map(f => `'${f}'`).join(' ')} && ` : '';
 	return `${restore}git fetch -q --depth 1 origin ${ref} && git checkout -q FETCH_HEAD`;
+}
+
+/** Copies the hardware project template into `name` (in the cwd) as a new repo, without its history; files staged. */
+export function hwProjectCloneCommand(name: string, url = GRHEEP_GIT): string {
+	return `{ git clone --progress --depth 1 '${url}' '${name}' && rm -rf '${name}/.git' && git -C '${name}' init -q && git -C '${name}' add -A; } `
+		+ `|| { rm -rf '${name}'; exit 1; }`;
+}
+
+/** A hardware project name: a lowercase SystemVerilog identifier once - becomes _, and a folder and fusesoc core name. */
+export const isHwProjectName = (name: string) => /^[a-z][a-z0-9]*([-_][a-z0-9]+)*$/.test(name) && name !== 'x-heep';
+
+/** `name` in place of gr-heep in `text`, in each spelling: gr_heep, gr-heep, GR_HEEP, GR-HEEP. */
+export function renameGrHeep(text: string, name: string): string {
+	const words = name.split(/[-_]/);
+	return text.replace(/(g)r([-_])heep/gi, (_, g: string, sep: string) => g === 'G' ? words.join(sep).toUpperCase() : words.join(sep));
+}
+
+/**
+ * Renames gr-heep to `name` in a fresh copy at `dir`: the tracked files' contents and paths. The vendored X-HEEP too:
+ * its FPGA constraints (and the patch adding them) name the top instance gr_heep_i.
+ */
+export function renameHwProject(dir: string, name: string) {
+	const files = execFileSync('git', ['ls-files', '-z'], { cwd: dir, encoding: 'utf8' }).split('\0').filter(Boolean);
+	const oldDirs = new Set<string>();
+	for (const f of files) {
+		const file = path.join(dir, f);
+		const bytes = fs.lstatSync(file).isFile() ? fs.readFileSync(file) : undefined; // a symlink keeps its target
+		if (bytes && !bytes.includes(0)) {
+			// latin1: byte for byte, so files that are not UTF-8 come back unchanged around the (ASCII) name.
+			const text = bytes.toString('latin1');
+			const renamed = renameGrHeep(text, name);
+			if (renamed !== text) {
+				fs.writeFileSync(file, renamed, 'latin1');
+			}
+		}
+		const to = path.join(dir, renameGrHeep(f, name));
+		if (to !== file) {
+			fs.mkdirSync(path.dirname(to), { recursive: true });
+			fs.renameSync(file, to);
+			oldDirs.add(path.dirname(file));
+		}
+	}
+	// The emptied folders (e.g. hw/gr-heep), deepest first.
+	for (const d of [...oldDirs].sort((a, b) => b.length - a.length)) {
+		if (d !== dir && fs.readdirSync(d).length === 0) {
+			fs.rmdirSync(d);
+		}
+	}
 }
 
 /** Creates <dir>/main.c with a hello world for a new app. */
@@ -343,6 +394,12 @@ export function buildCommand(o: Options): string {
 	return `make app ${appVars(o)}`;
 }
 
+/**
+ * A fusesoc build dir of the top-level system: X-HEEP's (openhwgroup.org_systems_core-v-mini-mcu_*) or a hardware
+ * project's (x-heep_systems_gr-heep_*, renamed in its forks); not build/debug (DEBUG_BUILD_ROOT).
+ */
+export const isCoreBuildDir = (d: string) => d.includes('_systems_');
+
 /** Compiled model inside build/<fusesoc core dir>/; mcu-gen's `fusesoc --setup` creates the dirs empty. */
 export const SIM_MODEL: Record<Simulator, string> = {
 	verilator: 'sim-verilator/Vtestharness',
@@ -472,9 +529,9 @@ export const BOARDS: Record<string, { official: boolean; part?: string; openocd?
 };
 
 /** Bitstream built for the board inside build/<fusesoc core dir>/<board>-vivado/ (fusesoc's own copy, top level). */
-export function builtBitstream(xheep: string, board: string): string | undefined {
-	const build = path.join(xheep, 'build');
-	for (const core of fs.existsSync(build) ? fs.readdirSync(build).filter(d => d.startsWith('openhwgroup.org_systems_core-v-mini-mcu_')) : []) {
+export function builtBitstream(hwRoot: string, board: string): string | undefined {
+	const build = path.join(hwRoot, 'build');
+	for (const core of fs.existsSync(build) ? fs.readdirSync(build).filter(isCoreBuildDir) : []) {
 		const dir = path.join(build, core, `${board}-vivado`);
 		const bit = fs.existsSync(dir) ? fs.readdirSync(dir).find(f => f.endsWith('.bit')) : undefined;
 		if (bit) {

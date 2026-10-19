@@ -118,25 +118,30 @@ def address_map(xheep, root):
         except Exception:  # a description reggen cannot read: the peripheral is still on the map
             return []
 
-    domains = [xheep.get_base_peripheral_domain(), xheep.get_user_peripheral_domain()]
+    # The domains' regions of the address map: older X-HEEPs (e.g. vendored by gr-heep) give domains no name or address.
+    domains = {"base_peripheral_domain": xheep.get_base_peripheral_domain(), "user_peripheral_domain": xheep.get_user_peripheral_domain()}
+    regions = xheep.address_map().get_regions()
     return {
         "banks": [{"name": f"ram{b.name()}", "start": b.start_address(), "length": b.size()} for b in xheep.memory_ss().iter_ram_banks()],
-        "regions": [
-            {"name": r.get_name(), "start": r.get_start_address(), "length": r.get_length()}
-            for r in xheep.address_map().get_regions()
-            if r.get_name() not in {d.get_name() for d in domains}
-        ],
+        "regions": [{"name": r.get_name(), "start": r.get_start_address(), "length": r.get_length()} for r in regions if r.get_name() not in domains],
         "domains": [
             {
-                "name": d.get_name(),
-                "start": d.get_start_address(),
-                "length": d.get_length(),
+                "name": r.get_name(),
+                "start": r.get_start_address(),
+                "length": r.get_length(),
                 "peripherals": [
-                    {"name": p.get_name(), "start": d.get_start_address() + p.get_address(), "length": p.get_length(), "registers": regs(p.get_name())}
-                    for p in d.get_peripherals()
+                    {
+                        "name": p.get_name(),
+                        "start": r.get_start_address() + p.get_address(),
+                        "length": p.get_length(),
+                        "registers": regs(p.get_name()),
+                        "ip": IP_OF.get(p.get_name(), p.get_name()),  # prefix of its <ip>_regs.h defines
+                    }
+                    for p in domains[r.get_name()].get_peripherals()
                 ],
             }
-            for d in domains
+            for r in regions
+            if r.get_name() in domains
         ],
     }
 

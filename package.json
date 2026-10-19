@@ -23,7 +23,8 @@
   ],
   "activationEvents": [
     "workspaceContains:util/xheep_gen/mcu_gen.py",
-    "workspaceContains:x-heep/util/xheep_gen/mcu_gen.py"
+    "workspaceContains:x-heep/util/xheep_gen/mcu_gen.py",
+    "workspaceContains:hw/vendor/x-heep/util/xheep_gen/mcu_gen.py"
   ],
   "main": "./dist/extension.js",
   "scripts": {
@@ -79,6 +80,12 @@
         "title": "New Software Project",
         "category": "X-HEEP",
         "icon": "$(new-folder)"
+      },
+      {
+        "command": "xheep.newHwProject",
+        "title": "New Hardware Project (gr-heep)",
+        "category": "X-HEEP",
+        "icon": "$(circuit-board)"
       },
       {
         "command": "xheep.updateXheep",
@@ -251,6 +258,11 @@
           "command": "xheep.newProject",
           "when": "view == xheep.apps",
           "group": "1_project@1"
+        },
+        {
+          "command": "xheep.newHwProject",
+          "when": "view == xheep.apps",
+          "group": "1_project@2"
         },
         {
           "command": "xheep.selectConfig",
@@ -610,7 +622,7 @@
       {
         "view": "xheep.apps",
         "when": "!xheep.active",
-        "contents": "No X-HEEP repository found in this folder.\n[New Software Project](command:xheep.newProject)\nKeeps your apps in this folder and adds X-HEEP in x-heep/.\n[Open X-HEEP Folder](command:vscode.openFolder)"
+        "contents": "No X-HEEP repository found in this folder.\n[New Software Project](command:xheep.newProject)\nKeeps your apps in this folder and adds X-HEEP in x-heep/.\n[New Hardware Project](command:xheep.newHwProject)\nClones gr-heep to extend X-HEEP with your own hardware.\n[Open X-HEEP Folder](command:vscode.openFolder)"
       }
     ]
   }

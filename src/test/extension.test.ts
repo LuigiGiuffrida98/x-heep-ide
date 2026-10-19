@@ -9,7 +9,7 @@ import { changedFiles, isGenerated, updateCommand, Options, buildCommand, simCom
 	gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
 	condaEnvName, requiredVersions, verilatorVersion, veribleVersion, usbDevices, udevRule, missingModulesCommand,
-	boardAdapters, pickAdapter, hdlProblems, veribleFileList, formattedDirs, appTestConfig } from '../xheep';
+	boardAdapters, pickAdapter, hdlProblems, veribleFileList, formattedDirs, appTestConfig, renameGrHeep, isHwProjectName } from '../xheep';
 
 const base: Options = { project: 'hello_world', mode: 'sim', compiler: 'gcc', board: 'pynq-z2', simulator: 'verilator' };
 
@@ -376,5 +376,17 @@ suite('Hardware development', () => {
 		const cfg = appTestConfig('SIM_TIMEOUT_S = 120\n\nBLACKLIST = [\n    "example_spi_read",\n    "coremark",  # Times out\n]\n');
 		assert.deepStrictEqual([...cfg.skip], [['example_spi_read', "left out by X-HEEP's app test"], ['coremark', 'Times out']]);
 		assert.strictEqual(cfg.timeoutS, 120);
+	});
+});
+
+suite('Hardware project', () => {
+	test('renames gr-heep in each spelling', () => {
+		assert.strictEqual(renameGrHeep('module gr_heep; // GR-HEEP\nname: x-heep:systems:gr-heep\n#ifndef GR_HEEP_H', 'my-chip'),
+			'module my_chip; // MY-CHIP\nname: x-heep:systems:my-chip\n#ifndef MY_CHIP_H');
+		assert.strictEqual(renameGrHeep('hw/gr-heep/gr_heep_pkg.sv.tpl', 'soc'), 'hw/soc/soc_pkg.sv.tpl');
+	});
+	test('takes names that make SystemVerilog identifiers', () => {
+		assert.deepStrictEqual(['my-chip', 'soc2', 'a_b', 'My-chip', '2soc', 'my--chip', 'my-', 'x-heep', 'my chip'].map(isHwProjectName),
+			[true, true, true, false, false, false, false, false, false]);
 	});
 });

@@ -24,7 +24,8 @@ export interface Platform {
 export interface AddressMap {
 	banks: AddressRange[];
 	regions: AddressRange[];
-	domains: (AddressRange & { peripherals: (AddressRange & { registers: Register[] })[] })[];
+	/** `ip`: the regtool IP a peripheral instantiates, prefix of its <ip>_regs.h defines (e.g. spi_host for spi_flash). */
+	domains: (AddressRange & { peripherals: (AddressRange & { ip?: string; registers: Register[] })[] })[];
 }
 
 export interface AddressRange { name: string; start: number; length: number }
@@ -40,8 +41,12 @@ export interface Register {
 	fields: { name: string; msb: number; lsb: number; access: string; desc: string }[];
 }
 
-/** A row of the Memory Map view: `address` is what Copy Address copies. */
-export interface MapNode { label: string; description: string; tooltip?: string; address?: number; children: MapNode[] }
+/** A row of the Memory Map view: `define` is what Copy Address copies, the C expression of `address`. */
+export interface MapNode { label: string; description: string; tooltip?: string; address?: number; define?: string; children: MapNode[] }
+
+/** Regions whose core_v_mini_mcu.h define is not named after them. */
+const DEFINE_OF: Record<string, string> = { ext_slaves: 'EXT_SLAVE', base_peripheral_domain: 'AO_PERIPHERAL', user_peripheral_domain: 'PERIPHERAL' };
+const startDefine = (name: string) => `${DEFINE_OF[name] ?? name.toUpperCase()}_START_ADDRESS`;
 
 export const hexAddress = (n: number) => `0x${n.toString(16).padStart(8, '0')}`;
 const size = (bytes: number) => bytes >= 1 << 20 ? `${bytes / (1 << 20)} MB` : bytes >= 1024 ? `${bytes / 1024} KB` : `${bytes} B`;
@@ -49,18 +54,21 @@ const size = (bytes: number) => bytes >= 1 << 20 ? `${bytes / (1 << 20)} MB` : b
 /** The Memory Map view's tree: RAM, then the address regions in address order, peripherals with registers and fields. */
 export function mapNodes(map: AddressMap): MapNode[] {
 	const range = (r: AddressRange, children: MapNode[] = []): MapNode =>
-		({ label: r.name, description: `${hexAddress(r.start)} · ${size(r.length)}`, address: r.start, children });
-	const register = (base: number, r: Register): MapNode => ({
+		({ label: r.name, description: `${hexAddress(r.start)} · ${size(r.length)}`, address: r.start, define: startDefine(r.name), children });
+	const register = (base: number, p: string, ip: string, r: Register): MapNode => ({
 		label: r.name,
 		description: `${hexAddress(base + r.offset)} · ${r.window ? `window, ${size(r.window)}` : r.access}`,
 		tooltip: `${r.desc}${r.reset !== undefined && !r.window ? `\n\nReset: 0x${r.reset.toString(16)}` : ''}`,
 		address: base + r.offset,
+		define: `${startDefine(p)} + ${ip.toUpperCase()}_${r.name.toUpperCase()}_REG_OFFSET`,
 		children: r.fields.map(f => ({ label: f.name, description: `[${f.msb === f.lsb ? f.msb : `${f.msb}:${f.lsb}`}] ${f.access}`, tooltip: f.desc, children: [] })),
 	});
 	const ram = map.banks.reduce((n, b) => n + b.length, 0);
 	return [
-		{ label: 'RAM', description: `${hexAddress(map.banks[0]?.start ?? 0)} · ${size(ram)}`, address: map.banks[0]?.start, children: map.banks.map(b => range(b)) },
-		...[...map.regions.map(r => range(r)), ...map.domains.map(d => range(d, d.peripherals.map(p => range(p, p.registers.map(r => register(p.start, r))))))]
+		{ label: 'RAM', description: `${hexAddress(map.banks[0]?.start ?? 0)} · ${size(ram)}`, address: map.banks[0]?.start,
+			define: map.banks[0] && startDefine(map.banks[0].name), children: map.banks.map(b => range(b)) },
+		...[...map.regions.map(r => range(r)),
+			...map.domains.map(d => range(d, d.peripherals.map(p => range(p, p.registers.map(r => register(p.start, p.name, p.ip ?? p.name, r))))))]
 			.sort((a, b) => a.address! - b.address!),
 	];
 }

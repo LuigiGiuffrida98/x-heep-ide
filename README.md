@@ -58,6 +58,15 @@ Run **X-HEEP: New Software Project** in an empty folder to keep your apps in you
 as a git submodule (or a link to an existing clone) in `x-heep/`.
 **Update X-HEEP** moves that submodule to the latest X-HEEP commit tested with the extension, or to `main`.
 
+## Hardware projects
+
+Run **X-HEEP: New Hardware Project** to start a new repo from [gr-heep](https://github.com/x-heep/gr-heep), to
+extend X-HEEP with your own hardware. It is renamed after its folder: `my-chip` gives `hw/my-chip/my_chip.sv`,
+module `my_chip`, core `x-heep:systems:my-chip`. The extension works in gr-heep and
+its forks (X-HEEP vendored in `hw/vendor/x-heep`): mcu-gen, the simulation models and the bitstream are built with
+the project's Makefile, the configuration defaults to `config/mcu-gen-config.py`, and apps go in `sw/applications`.
+Update the vendored X-HEEP with `make vendor-update`.
+
 ## Settings
 
 All under `xheep.*`. The defaults work for most setups. `envSetup`, `riscvToolchain`, `fpgaBoard`, `bitstream`

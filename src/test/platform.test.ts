@@ -90,7 +90,7 @@ suite('Memory map', () => {
 			banks: [{ name: 'ram0', start: 0, length: 32768 }, { name: 'ram1', start: 32768, length: 32768 }],
 			regions: [{ name: 'flash_mem', start: 0x40000000, length: 1 << 24 }, { name: 'debug', start: 0x10000000, length: 1 << 20 }],
 			domains: [{ name: 'user_peripheral_domain', start: 0x30000000, length: 1 << 20, peripherals: [{
-				name: 'uart', start: 0x30080000, length: 65536, registers: [{
+				name: 'spi_flash', ip: 'spi_host', start: 0x30080000, length: 65536, registers: [{
 					name: 'CTRL', offset: 0xc, desc: 'UART control register', access: 'rw', reset: 0,
 					fields: [{ name: 'TX', msb: 0, lsb: 0, access: 'rw', desc: 'TX enable' }, { name: 'NCO', msb: 31, lsb: 16, access: 'rw', desc: '' }],
 				}],
@@ -101,6 +101,8 @@ suite('Memory map', () => {
 		const ctrl = nodes[2].children[0].children[0];
 		assert.strictEqual(ctrl.description, '0x3008000c · rw');
 		assert.strictEqual(ctrl.address, 0x3008000c);
+		assert.strictEqual(ctrl.define, 'SPI_FLASH_START_ADDRESS + SPI_HOST_CTRL_REG_OFFSET');
+		assert.deepStrictEqual([nodes[0].define, nodes[2].define], ['RAM0_START_ADDRESS', 'PERIPHERAL_START_ADDRESS']);
 		assert.deepStrictEqual(ctrl.children.map(f => f.description), ['[0] rw', '[31:16] rw']);
 	});
 });

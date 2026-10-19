@@ -12,7 +12,7 @@ import {
 } from './tools';
 import { Mode, MODES, JTAG_ADAPTERS, Adapter, boardAdapters, pickAdapter, Options, Simulator, SIM_MODEL, buildCommand, simCommand, simModelBuildCommand, FLASH_COMMAND, mcuGenCommand, simSummary, incrementalBuildCommand, verilatorRunCommand,
 	DEBUG_BUILD_ROOT, debugModelBuildCommand, debugSimCommand, openocdCommand,
-	XHEEP_GIT, XHEEP_COMMIT_URL, isCommit, cloneCommand, changedFiles, isGenerated, updateCommand, writeMain, projectSource, configTemplate,
+	XHEEP_GIT, GRHEEP_GIT, XHEEP_COMMIT_URL, isCoreBuildDir, hwProjectCloneCommand, isHwProjectName, renameHwProject, isCommit, cloneCommand, changedFiles, isGenerated, updateCommand, writeMain, projectSource, configTemplate,
 	Programmer, BOARDS, BitstreamInfo, fileSha1, builtBitstream, bitstreamBuildCommand, vivadoTcl, vivadoCommand, openocdFpgaCommand,
 	EXIT_BREAKPOINT, gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	linkerScript, memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
@@ -26,8 +26,10 @@ import { EditorState, openPlatformEditor, refreshPlatformEditor } from './platfo
 let extensionDir: string;
 let extensionId: string;
 let folder: vscode.WorkspaceFolder;
-/** The X-HEEP repo: the workspace itself, or `x-heep/` inside a software project. */
+/** The X-HEEP repo: the workspace itself, `x-heep/` inside a software project, or hw/vendor/x-heep in a hardware project. */
 let root: string;
+/** Where the hardware is generated and built (make mcu-gen, fusesoc's build/): X-HEEP, or the hardware project (gr-heep). */
+let hwRoot: string;
 /** The sw/ dir holding the user's apps: X-HEEP's own, or the software project's. */
 let swRoot: string;
 let state: vscode.Memento;
@@ -48,6 +50,7 @@ const cfg = () => vscode.workspace.getConfiguration('xheep');
 const examplesDir = () => path.join(root, 'sw', 'applications');
 const userAppsDir = () => path.join(swRoot, 'applications');
 const isProject = () => swRoot !== path.join(root, 'sw');
+const isHwProject = () => hwRoot !== root;
 const currentApp = () => state.get<string>('app', 'hello_world');
 const currentMode = () => state.get<Mode>('mode', 'sim');
 
@@ -111,9 +114,8 @@ function findTool(suffix: string): string | undefined {
 }
 
 function simBuilt(sim: Simulator): boolean {
-	const build = path.join(root, 'build');
-	return fs.existsSync(build) && fs.readdirSync(build).some(d =>
-		d.startsWith('openhwgroup.org_systems_core-v-mini-mcu_') && fs.existsSync(path.join(build, d, SIM_MODEL[sim])));
+	const build = path.join(hwRoot, 'build');
+	return fs.existsSync(build) && fs.readdirSync(build).some(d => isCoreBuildDir(d) && fs.existsSync(path.join(build, d, SIM_MODEL[sim])));
 }
 
 function options(project = currentApp(), mode = currentMode()): Options {
@@ -132,16 +134,19 @@ function options(project = currentApp(), mode = currentMode()): Options {
 // --- Platform configuration -------------------------------------------------
 
 const projectDir = () => folder.uri.fsPath;
-const userConfigsDir = () => path.join(projectDir(), 'configs');
+// gr-heep keeps its configuration in config/, as its Makefile's X_HEEP_CFG.
+const userConfigsDir = () => path.join(projectDir(), isHwProject() ? 'config' : 'configs');
 
 /** The active config: `xheep.mcuConfig`, looked up in the project first, then in X-HEEP. */
 function configPath(): string {
-	const c = cfg().get<string>('mcuConfig', 'configs/general.py');
+	const set = cfg().inspect<string>('mcuConfig');
+	const c = set?.workspaceFolderValue ?? set?.workspaceValue ?? set?.globalValue
+		?? (isHwProject() ? 'config/mcu-gen-config.py' : 'configs/general.py');
 	return [projectDir(), root].map(d => path.resolve(d, c)).find(fs.existsSync) ?? path.resolve(root, c);
 }
 
 function listConfigs(dir: string): string[] {
-	return fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => /\.(py|hjson)$/.test(f) && !f.startsWith('pad_cfg')).sort() : [];
+	return fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => /\.(py|hjson)$/.test(f) && !f.includes('pad_cfg')).sort() : [];
 }
 
 const fileHash = (file: string) => fs.existsSync(file) ? createHash('sha1').update(fs.readFileSync(file)).digest('hex') : 'missing';
@@ -158,11 +163,11 @@ const modelKey = (sim: Simulator) => `modelStamp.${sim}`;
 const modelReady = (sim: Simulator) => simBuilt(sim) && state.get(modelKey(sim)) === state.get('platformStamp') && !rtlChangedSince(sim);
 
 const RTL_FILE = /\.(sv|svh|v|vh|vlt|core)$/;
-const isRtl = (file: string) => RTL_FILE.test(file) && ['hw', 'tb'].some(d => file.startsWith(path.join(root, d) + path.sep));
+const isRtl = (file: string) => RTL_FILE.test(file) && ['hw', 'tb'].some(d => file.startsWith(path.join(hwRoot, d) + path.sep));
 
-/** Newest change to X-HEEP's RTL (hw/, tb/), including what the model build itself writes there (the boot ROM). */
+/** Newest change to the RTL (hw/, tb/), including what the model build itself writes there (the boot ROM). */
 function rtlChangedAt(): number {
-	return ['hw', 'tb'].map(d => path.join(root, d)).filter(fs.existsSync)
+	return ['hw', 'tb'].map(d => path.join(hwRoot, d)).filter(fs.existsSync)
 		.flatMap(d => fs.readdirSync(d, { recursive: true, withFileTypes: true }))
 		.filter(e => e.isFile() && RTL_FILE.test(e.name))
 		.reduce((t, e) => Math.max(t, fs.statSync(path.join(e.parentPath, e.name)).mtimeMs), 0);
@@ -198,7 +203,7 @@ const showTaskLog = (task: vscode.Task) => vscode.window.terminals.find(t => t.n
 async function generatePlatform(silent: boolean): Promise<boolean> {
 	const stamp = platformStamp();
 	const config = configPath();
-	const ok = await runQuiet(`Generating platform (${path.basename(config)})`, makeTask('mcu-gen', mcuGenCommand(config)), silent);
+	const ok = await runQuiet(`Generating platform (${path.basename(config)})`, makeTask('mcu-gen', mcuGenCommand(config), false, {}, hwRoot), silent);
 	if (ok) {
 		await state.update('platformStamp', stamp);
 		// Apps use what the platform offers, e.g. a hardware FPU.
@@ -234,7 +239,7 @@ async function buildModel(sim: Simulator, silent: boolean): Promise<boolean> {
 	}
 	const build = (async () => {
 		savedDuringBuild.delete(sim);
-		const task = makeTask(`Build ${sim} model`, simModelBuildCommand(sim));
+		const task = makeTask(`Build ${sim} model`, simModelBuildCommand(sim), false, {}, hwRoot);
 		const ok = await runQuiet(`Building ${sim} model`, task, silent, false);
 		if (ok) {
 			await state.update(modelKey(sim), state.get('platformStamp'));
@@ -256,10 +261,10 @@ async function buildModel(sim: Simulator, silent: boolean): Promise<boolean> {
 
 /** Verilator's and Questasim's errors (and warnings outside vendored IPs) of the last model build, in the Problems panel. */
 function reportModelProblems(what: string, workDir: string | undefined, ok: boolean, task: vscode.Task) {
-	const vendor = path.join(root, 'hw', 'vendor') + path.sep;
-	const problems = workDir ? hdlProblems(readText(path.join(root, 'buildsim.log')), workDir, f => !f.startsWith(vendor)) : [];
+	const vendor = path.join(hwRoot, 'hw', 'vendor') + path.sep;
+	const problems = workDir ? hdlProblems(readText(path.join(hwRoot, 'buildsim.log')), workDir, f => !f.startsWith(vendor)) : [];
 	hdlProblemsCollection.clear();
-	showProblems(hdlProblemsCollection, problems, path.join(root, 'buildsim.log'));
+	showProblems(hdlProblemsCollection, problems, path.join(hwRoot, 'buildsim.log'));
 	if (!ok) {
 		const error = problems.find(p => p.severity === 'error');
 		vscode.window.showErrorMessage(`X-HEEP: building the ${what} failed${error ? `: ${error.message}` : '.'}`,
@@ -457,7 +462,7 @@ const fpgaBoard = () => cfg().get<string>('fpgaBoard', 'pynq-z2');
 function bitstreamFile(): string | undefined {
 	const set = cfg().get<string>('bitstream', '').trim();
 	if (!set) {
-		return builtBitstream(root, fpgaBoard());
+		return builtBitstream(hwRoot, fpgaBoard());
 	}
 	const file = path.resolve(projectDir(), set.replace(/^~(?=$|\/)/, os.homedir()));
 	return fs.existsSync(file) ? file : undefined;
@@ -624,10 +629,10 @@ async function buildBitstream() {
 	const info: BitstreamInfo = {
 		board, config, bscan, xheepCommit: await gitHead(), hardware: 'platform' in read ? hardwareFingerprint(read.platform) : undefined,
 	};
-	if (!await runQuiet(`Building the ${board} bitstream with Vivado (this takes a while)`, makeTask('Build bitstream', bitstreamBuildCommand(board, bscan)), true)) {
+	if (!await runQuiet(`Building the ${board} bitstream with Vivado (this takes a while)`, makeTask('Build bitstream', bitstreamBuildCommand(board, bscan), false, {}, hwRoot), true)) {
 		return;
 	}
-	const bitstream = builtBitstream(root, board)!;
+	const bitstream = builtBitstream(hwRoot, board)!;
 	await rememberBitstream(bitstream, { ...info, builtAt: new Date().toISOString() });
 	const elsewhere = !!cfg().get<string>('bitstream', '').trim();
 	const pick = await vscode.window.showInformationMessage(`X-HEEP: bitstream ready (${path.basename(config)}).`
@@ -655,9 +660,9 @@ function taskEnv(): Record<string, string> {
 	};
 }
 
-function makeTask(name: string, cmd: string, rawShell = false, env: Record<string, string> = {}): vscode.Task {
+function makeTask(name: string, cmd: string, rawShell = false, env: Record<string, string> = {}, cwd = root): vscode.Task {
 	const exec = new vscode.ShellExecution(rawShell ? cmd : withEnvSetup(cmd), {
-		executable: '/bin/bash', shellArgs: ['-c'], cwd: root, env: { ...taskEnv(), ...env },
+		executable: '/bin/bash', shellArgs: ['-c'], cwd, env: { ...taskEnv(), ...env },
 	});
 	const task = new vscode.Task({ type: 'xheep', command: cmd }, folder, name, 'X-HEEP', exec, ['$xheep-gcc']);
 	task.presentationOptions = { reveal: vscode.TaskRevealKind.Always, clear: true };
@@ -761,7 +766,7 @@ async function pinnedCommit(): Promise<string | undefined> {
 }
 
 /** X-HEEP is the submodule the extension added to a software project (not the user's own clone, opened or linked). */
-const managedXheep = () => isProject() && !fs.lstatSync(root).isSymbolicLink()
+const managedXheep = () => isProject() && !isHwProject() && !fs.lstatSync(root).isSymbolicLink()
 	&& /path\s*=\s*x-heep\s*$/m.test(readText(path.join(projectDir(), '.gitmodules')));
 
 const short = (sha?: string) => sha?.slice(0, 7) ?? '?';
@@ -774,6 +779,10 @@ const short = (sha?: string) => sha?.slice(0, 7) ?? '?';
 async function updateXheep() {
 	const head = await gitHead();
 	const pin = await pinnedCommit();
+	if (isHwProject()) {
+		vscode.window.showInformationMessage(`X-HEEP is vendored in ${path.relative(projectDir(), root)}: update it with make vendor-update.`);
+		return;
+	}
 	if (!managedXheep()) {
 		vscode.window.showInformationMessage(`X-HEEP here is your own clone (${root}): update it with git. It is at ${short(head)}`
 			+ (pin ? `; the extension is tested with ${short(pin)}.` : '.'));
@@ -862,6 +871,41 @@ async function newProject() {
 	await (ws?.uri.fsPath === dir
 		? vscode.commands.executeCommand('workbench.action.reloadWindow')
 		: vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(dir)));
+}
+
+/**
+ * Copies gr-heep into a new repo, a hardware project extending X-HEEP (vendored in hw/vendor/x-heep), renamed after
+ * the folder (files, SystemVerilog modules, fusesoc core), commits it and opens it.
+ */
+async function newHwProject() {
+	const parent = (await vscode.window.showOpenDialog({
+		canSelectFolders: true, canSelectFiles: false, defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+		title: 'Folder to create the hardware project in', openLabel: 'Create Project Here',
+	}))?.[0]?.fsPath;
+	if (!parent) {
+		return;
+	}
+	const name = await vscode.window.showInputBox({
+		prompt: `Name of the hardware project: a new folder in ${parent}, cloned from gr-heep and renamed (my_heep.sv, x-heep:systems:my-heep, ...)`,
+		value: 'my-heep',
+		validateInput: v => !isHwProjectName(v) ? 'Lowercase letters and digits, starting with a letter, words separated by - or _ (not x-heep)'
+			: fs.existsSync(path.join(parent, v)) ? 'This folder already exists' : undefined,
+	});
+	if (!name) {
+		return;
+	}
+	if (await runLogged('Cloning gr-heep…', hwProjectCloneCommand(name), parent) !== 0) {
+		vscode.window.showErrorMessage(`Cloning ${GRHEEP_GIT} failed, see the X-HEEP output. Nothing was left behind: you can retry.`);
+		return;
+	}
+	const dir = path.join(parent, name);
+	if (name !== 'gr-heep') {
+		renameHwProject(dir, name);
+	}
+	if (await runLogged(`Committing ${name}…`, `git add -A && git commit -q -m 'Initial commit, from ${GRHEEP_GIT}'`, dir) !== 0) {
+		vscode.window.showWarningMessage(`${name} is ready, but its first commit failed (see the X-HEEP output): commit it yourself.`);
+	}
+	await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(dir));
 }
 
 /** A known adapter, or a custom OpenOCD config set in `xheep.openocdConfig`. */
@@ -999,8 +1043,8 @@ async function build(app?: string) {
 }
 
 function simDir(sim: Simulator): string | undefined {
-	const build = path.join(root, 'build');
-	const core = fs.existsSync(build) ? fs.readdirSync(build).find(d => d.startsWith('openhwgroup.org_systems_core-v-mini-mcu_')) : undefined;
+	const build = path.join(hwRoot, 'build');
+	const core = fs.existsSync(build) ? fs.readdirSync(build).find(isCoreBuildDir) : undefined;
 	return core && path.join(build, core, path.dirname(SIM_MODEL[sim]));
 }
 
@@ -1118,7 +1162,7 @@ async function runSim(o: Options, onText: (text: string) => void, token: vscode.
 			job?.kill();
 		}
 	});
-	job = startJob(o.simulator === 'verilator' && dir ? verilatorRunCommand(dir) : withEnvSetup(simCommand(o)), root);
+	job = startJob(o.simulator === 'verilator' && dir ? verilatorRunCommand(dir) : withEnvSetup(simCommand(o)), hwRoot);
 	const sim = job;
 	const cancel = token.onCancellationRequested(sim.kill);
 	const timer = timeoutMs ? setTimeout(() => { timedOut = true; sim.kill(); }, timeoutMs) : undefined;
@@ -1360,13 +1404,13 @@ async function runJtag(o: Options, fpga: { bitstream?: string; tool?: Programmer
 	return result;
 }
 
-const debugSimDir = () => path.join(root, DEBUG_BUILD_ROOT, 'sim-verilator');
+const debugSimDir = () => path.join(hwRoot, DEBUG_BUILD_ROOT, 'sim-verilator');
 const debugModelReady = () => fs.existsSync(path.join(debugSimDir(), 'Vtestharness'))
 	&& state.get('modelStamp.debug') === state.get('platformStamp') && !rtlChangedSince('debug');
 
 // shortcut: saves during a debug model build are not tracked (savedDuringBuild), so such an edit waits for the next one.
 async function buildDebugModel(): Promise<boolean> {
-	const task = makeTask('Build debug model', debugModelBuildCommand());
+	const task = makeTask('Build debug model', debugModelBuildCommand(), false, {}, hwRoot);
 	const ok = await runQuiet('Building verilator debug model', task, true, false);
 	if (ok) {
 		await state.update('modelStamp.debug', state.get('platformStamp'));
@@ -2246,6 +2290,8 @@ function setupIntelliSense() {
 }
 
 const isXheep = (dir: string) => fs.existsSync(path.join(dir, 'util', 'xheep_gen', 'mcu_gen.py'));
+/** Where X-HEEP is in a workspace folder: the folder itself, a software project's x-heep/, a hardware project's hw/vendor/x-heep. */
+const xheepIn = (dir: string) => [dir, path.join(dir, 'x-heep'), path.join(dir, 'hw', 'vendor', 'x-heep')].find(isXheep);
 
 export function activate(context: vscode.ExtensionContext) {
 	extensionDir = context.extensionPath;
@@ -2256,9 +2302,10 @@ export function activate(context: vscode.ExtensionContext) {
 	hdlProblemsCollection = vscode.languages.createDiagnosticCollection('xheep-rtl');
 	context.subscriptions.push(output, uart, buildProblems, hdlProblemsCollection,
 		vscode.commands.registerCommand('xheep.newProject', newProject),
+		vscode.commands.registerCommand('xheep.newHwProject', newHwProject),
 		vscode.commands.registerCommand('xheep.openInContainer', openInContainer));
-	// Either X-HEEP itself is open, or a software project with X-HEEP in x-heep/.
-	const found = vscode.workspace.workspaceFolders?.find(f => isXheep(f.uri.fsPath) || isXheep(path.join(f.uri.fsPath, 'x-heep')));
+	// X-HEEP itself is open, a software project with X-HEEP in x-heep/, or a hardware project (gr-heep) vendoring it.
+	const found = vscode.workspace.workspaceFolders?.find(f => xheepIn(f.uri.fsPath));
 	if (!found) {
 		// Empty view, so its welcome content (package.json viewsWelcome) offers to create a project.
 		context.subscriptions.push(vscode.window.registerTreeDataProvider('xheep.apps', { getChildren: () => [], getTreeItem: (x: string) => new vscode.TreeItem(x) }));
@@ -2272,7 +2319,8 @@ export function activate(context: vscode.ExtensionContext) {
 		return;
 	}
 	const dir = folder.uri.fsPath;
-	root = isXheep(dir) ? dir : path.join(dir, 'x-heep');
+	root = xheepIn(dir)!;
+	hwRoot = root.endsWith(path.join('hw', 'vendor', 'x-heep')) ? dir : root;
 	swRoot = path.join(dir, 'sw');
 	vscode.commands.executeCommand('setContext', 'xheep.active', true);
 	state = context.workspaceState;
@@ -2351,7 +2399,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('xheep.refreshApps', () => apps.refresh()),
 		vscode.commands.registerCommand('xheep.openWaves', openWaves),
 		vscode.commands.registerCommand('xheep.refreshMemoryMap', () => memoryMap.refresh()),
-		vscode.commands.registerCommand('xheep.copyAddress', (node: MapNode) => vscode.env.clipboard.writeText(hexAddress(node.address!))),
+		vscode.commands.registerCommand('xheep.copyAddress', (node: MapNode) => vscode.env.clipboard.writeText(node.define ?? hexAddress(node.address!))),
 	);
 
 	refreshUi();

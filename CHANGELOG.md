@@ -7,6 +7,8 @@
   knobs (cache geometry and SPM size, DRAM, peripherals). Debug is wired up, waiting for X-ALP's JTAG debugging to
   work in simulation. FPGA and flash stay X-HEEP's only.
 - No longer takes an X-ALP repo for X-HEEP (it vendors X-HEEP's generator, but builds and runs differently).
+- A project whose path has spaces or `? * + [ ] ( ) | ^ $ \` is refused when created, and gets a clear error
+  instead of a failed build: make and the platforms' CMake cannot handle them.
 
 ## 0.5.0
 

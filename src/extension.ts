@@ -13,7 +13,7 @@ import {
 import { SOCS, Soc, socOf } from './soc';
 import { Mode, MODES, JTAG_ADAPTERS, Adapter, boardAdapters, pickAdapter, Options, Simulator, SIM_MODEL, buildCommand, simCommand, simModelBuildCommand, FLASH_COMMAND, mcuGenCommand, simSummary, incrementalBuildCommand, verilatorRunCommand,
 	DEBUG_BUILD_ROOT, debugModelBuildCommand, debugSimCommand, openocdCommand,
-	GRHEEP_GIT, XHEEP_COMMIT_URL, isCoreBuildDir, hwProjectCloneCommand, isHwProjectName, renameHwProject, isCommit, cloneCommand, changedFiles, isGenerated, updateCommand, writeMain, projectSource, configTemplate,
+	GRHEEP_GIT, XHEEP_COMMIT_URL, isCoreBuildDir, hwProjectCloneCommand, isHwProjectName, renameHwProject, unbuildablePathChars, isCommit, cloneCommand, changedFiles, isGenerated, updateCommand, writeMain, projectSource, configTemplate,
 	Programmer, BOARDS, BitstreamInfo, fileSha1, builtBitstream, bitstreamBuildCommand, vivadoTcl, vivadoCommand, openocdFpgaCommand,
 	exitBreakpoint, gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	linkerScript, memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
@@ -842,6 +842,10 @@ async function newProject(p: Soc = SOCS['x-heep']) {
 	if (!dir) {
 		return;
 	}
+	if (unbuildablePathChars(dir).length) {
+		vscode.window.showErrorMessage(`${p.name} cannot build in a folder whose path has ${unbuildablePathChars(dir).map(c => `"${c}"`).join(' ')}: pick another one.`);
+		return;
+	}
 	if (socOf(dir)) {
 		vscode.window.showErrorMessage(`This is the ${socOf(dir)!.name} repository itself: pick the folder of your own project.`);
 		return;
@@ -904,6 +908,10 @@ async function newHwProject() {
 		title: 'Folder to create the hardware project in', openLabel: 'Create Project Here',
 	}))?.[0]?.fsPath;
 	if (!parent) {
+		return;
+	}
+	if (unbuildablePathChars(parent).length) {
+		vscode.window.showErrorMessage(`X-HEEP cannot build in a folder whose path has ${unbuildablePathChars(parent).map(c => `"${c}"`).join(' ')}: pick another one.`);
 		return;
 	}
 	const name = await vscode.window.showInputBox({
@@ -998,6 +1006,12 @@ function listFiles(dir: string): string[] {
 
 /** Compiles the app quietly: the result shows as a tick or cross, the terminal only on failure (unless `quiet`). */
 async function compile(o: Options, quiet = false): Promise<boolean> {
+	const bad = unbuildablePathChars(`${fs.realpathSync(root)}${fs.realpathSync(swRoot)}`);
+	if (bad.length) {
+		vscode.window.showErrorMessage(`${soc.name}: the project's path has ${bad.map(c => `"${c}"`).join(' ')}, which ${soc.name}'s build cannot handle. `
+			+ 'Rename or move the folder (letters, digits, -, _ and . are fine).');
+		return false;
+	}
 	await setBuildStatus(o.project, 'running');
 	// CMake globs the sources at configure time, so a new or removed file needs the full `make app`.
 	const key = JSON.stringify([buildCommand(o), state.get('platformStamp'), listFiles(appDir(o.project))]);

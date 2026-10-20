@@ -9,7 +9,7 @@ import { changedFiles, isGenerated, updateCommand, Options, buildCommand, simCom
 	gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
 	condaEnvName, requiredVersions, verilatorVersion, veribleVersion, usbDevices, udevRule, missingModulesCommand,
-	boardAdapters, pickAdapter, hdlProblems, veribleFileList, formattedDirs, appTestConfig, renameGrHeep, isHwProjectName, writeMain, linkerScript, isCoreBuildDir } from '../xheep';
+	boardAdapters, pickAdapter, hdlProblems, veribleFileList, formattedDirs, appTestConfig, renameGrHeep, isHwProjectName, writeMain, linkerScript, isCoreBuildDir, unbuildablePathChars } from '../xheep';
 import { SOCS, socOf } from '../soc';
 
 const base: Options = { project: 'hello_world', mode: 'sim', compiler: 'gcc', board: 'pynq-z2', simulator: 'verilator' };
@@ -441,6 +441,12 @@ suite('X-ALP', () => {
 			"cd '/m' && ./Vtestharness +openOCD=true +BOOTMODE=jtag +BINARY='/x/sw/build/main.spm.elf' --trace=false");
 		// main returns into crt0, with the exit code in a0; _exit is only linked when the app calls exit().
 		assert.ok(gdbRunCommand('gdb', 'e', SOCS['x-alp'].exitSymbol).includes("-ex 'break *_crt_return' -ex continue"));
+	});
+
+	test('paths make or CMake cannot build in are caught before the build', () => {
+		assert.deepStrictEqual(unbuildablePathChars('/Users/me/Desktop/prova?2/sw'), ['?']);
+		assert.deepStrictEqual(unbuildablePathChars('/Users/me/My Projects/a+b'), [' ', '+']);
+		assert.deepStrictEqual(unbuildablePathChars('/home/me/x-heep_proj.v2/sw'), []);
 	});
 
 	test('new projects and apps', () => {

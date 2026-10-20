@@ -94,6 +94,12 @@ export function renameHwProject(dir: string, name: string) {
 	}
 }
 
+/**
+ * Characters in `dir` that break `make app`: make splits on whitespace, and X-HEEP's and X-ALP's sw/CMakeLists.txt
+ * match paths as regular expressions (`MATCHES "${SOURCE_PATH}device/"`), so `prova?2` finds no sources.
+ */
+export const unbuildablePathChars = (dir: string) => [...new Set(dir.match(/[\s?*+[\]()|^$\\]/g) ?? [])];
+
 /** Creates <dir>/main.c with a hello world for a new app. X-ALP's printf is its own (printf.h), not newlib's. */
 export function writeMain(dir: string, name: string, soc: SocId = 'x-heep') {
 	fs.mkdirSync(dir, { recursive: true });

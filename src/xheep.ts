@@ -5,6 +5,7 @@ import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { SOCS, SocId } from './soc';
 
 export const XHEEP_GIT = 'https://github.com/x-heep/x-heep.git';
 /** Template of a hardware project extending X-HEEP, which it vendors in hw/vendor/x-heep. */
@@ -18,14 +19,14 @@ export const XHEEP_COMMIT_URL = 'https://raw.githubusercontent.com/LuigiGiuffrid
 export const isCommit = (s: string) => /^[0-9a-f]{40}$/.test(s);
 
 /**
- * Adds X-HEEP as a shallow submodule in x-heep/, at `commit` if given;
+ * Adds the platform (X-HEEP by default) as a shallow submodule in `dir`, at `commit` if given;
  * on failure drops the half clone so a retry starts clean.
  */
-export function cloneCommand(url = XHEEP_GIT, commit?: string): string {
-	const pin = commit ? ` && git -C x-heep fetch -q --depth 1 origin ${commit} && git -C x-heep checkout -q ${commit} && git add x-heep` : '';
+export function cloneCommand(url = XHEEP_GIT, commit?: string, dir = 'x-heep'): string {
+	const pin = commit ? ` && git -C ${dir} fetch -q --depth 1 origin ${commit} && git -C ${dir} checkout -q ${commit} && git add ${dir}` : '';
 	return `{ [ -d .git ] || git init; } && `
-		+ `{ git submodule add --progress --depth 1 ${url} x-heep && git config -f .gitmodules submodule.x-heep.shallow true${pin}; } `
-		+ `|| { git rm -q --cached x-heep 2>/dev/null; rm -rf x-heep .git/modules/x-heep; exit 1; }`;
+		+ `{ git submodule add --progress --depth 1 ${url} ${dir} && git config -f .gitmodules submodule.${dir}.shallow true${pin}; } `
+		+ `|| { git rm -q --cached ${dir} 2>/dev/null; rm -rf ${dir} .git/modules/${dir}; exit 1; }`;
 }
 
 /** Paths changed in a work tree, from `git status --porcelain --untracked-files=no` (a rename gives its new path). */
@@ -93,11 +94,11 @@ export function renameHwProject(dir: string, name: string) {
 	}
 }
 
-/** Creates <dir>/main.c with a hello world for a new app. */
-export function writeMain(dir: string, name: string) {
+/** Creates <dir>/main.c with a hello world for a new app. X-ALP's printf is its own (printf.h), not newlib's. */
+export function writeMain(dir: string, name: string, soc: SocId = 'x-heep') {
 	fs.mkdirSync(dir, { recursive: true });
-	fs.writeFileSync(path.join(dir, 'main.c'),
-		`#include <stdio.h>\n#include <stdlib.h>\n\nint main(void)\n{\n    printf("Hello from ${name}!\\n");\n    return EXIT_SUCCESS;\n}\n`);
+	fs.writeFileSync(path.join(dir, 'main.c'), `${soc === 'x-alp' ? '#include "printf.h"\n' : ''}`
+		+ `#include <stdio.h>\n#include <stdlib.h>\n\nint main(void)\n{\n    printf("Hello from ${name}!\\n");\n    return EXIT_SUCCESS;\n}\n`);
 }
 
 /**
@@ -113,16 +114,16 @@ export function projectSource(xheep: string, swRoot: string): string {
 	return path.relative(fs.realpathSync(path.join(xheep, 'sw')), fs.realpathSync(swRoot));
 }
 
-/** A new platform configuration: X-HEEP's configs/general.py with Pylance-friendly imports. */
-export function configTemplate(xheep: string, name: string): string {
+/** A new platform configuration: the platform's `base` (X-HEEP's configs/general.py) with Pylance-friendly imports. */
+export function configTemplate(xheep: string, name: string, base = 'configs/general.py'): string {
 	const findModule = (pkg: string, cls: string) => {
 		const dir = path.join(xheep, 'util', 'xheep_gen', ...pkg.split('.'));
 		const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith('.py') && f !== '__init__.py') : [];
 		return files.find(f => new RegExp(`^class ${cls}\\b`, 'm').test(fs.readFileSync(path.join(dir, f), 'utf8')))?.replace(/\.py$/, '');
 	};
-	return `# Platform configuration "${name}", started from X-HEEP configs/general.py.\n`
+	return `# Platform configuration "${name}", started from ${base}.\n`
 		+ '# Edit and save: the extension regenerates the platform before the next build.\n'
-		+ explicitImports(fs.readFileSync(path.join(xheep, 'configs', 'general.py'), 'utf8'), findModule);
+		+ explicitImports(fs.readFileSync(path.join(xheep, base), 'utf8'), findModule);
 }
 
 export type Mode = 'sim' | 'fpga-jtag' | 'fpga-flash';
@@ -181,18 +182,23 @@ export interface Options {
 	source?: string;
 	/** make ARCH, when the platform needs other than X-HEEP's default (e.g. a hardware FPU). */
 	arch?: string;
+	/** X-ALP only: the memory the app is linked into and runs from (spm, dram). */
+	linker?: string;
 }
 
 export function appVars(o: Options): string {
 	const target = o.mode === 'sim' ? 'sim' : o.board;
-	const linker = o.mode === 'fpga-flash' ? 'flash_load' : 'on_chip';
+	const linker = o.linker ?? (o.mode === 'fpga-flash' ? 'flash_load' : 'on_chip');
 	const source = o.source ? ` SOURCE=${o.source}` : '';
 	// -fstack-usage: a .su file per object, read by stackProblems (X-HEEP builds with -w, so no -Wstack-usage).
-	return `PROJECT=${o.project} TARGET=${target} LINKER=${linker} COMPILER=${o.compiler}${source}${o.arch ? ` ARCH=${o.arch}` : ''} COMPILER_FLAGS=-fstack-usage`;
+	// shortcut: none for X-ALP, whose COMPILER_FLAGS must stay -mabi=lp64d and whose Makefile splits a second flag off;
+	// its stack checks wait for a way to pass one.
+	const flags = o.linker ? '' : ' COMPILER_FLAGS=-fstack-usage';
+	return `PROJECT=${o.project} TARGET=${target} LINKER=${linker} COMPILER=${o.compiler}${source}${o.arch ? ` ARCH=${o.arch}` : ''}${flags}`;
 }
 
-/** The linker script `make app` uses for the mode, in X-HEEP's sw/linker/. */
-export const linkerScript = (mode: Mode) => mode === 'fpga-flash' ? 'link_flash_load.ld' : 'link.ld';
+/** The linker script `make app` uses, in the platform's sw/linker/. */
+export const linkerScript = (o: Pick<Options, 'mode' | 'linker'>) => o.linker ? `${o.linker}.ld` : o.mode === 'fpga-flash' ? 'link_flash_load.ld' : 'link.ld';
 
 // --- Environment check ----------------------------------------------------------
 
@@ -204,9 +210,9 @@ export const PYTHON_MODULES = ['hjson', 'mako', 'fusesoc', 'edalize', 'pkg_resou
 /** Picks the environment's Python into $py as X-HEEP's Makefile does: conda's `python`, else the repo's .venv. */
 const PICK_PYTHON = 'if [ -n "$CONDA_DEFAULT_ENV" ]; then py=python; else py=.venv/bin/python; fi; ';
 
-/** Prints the modules of PYTHON_MODULES the environment's Python cannot import. */
-export function missingModulesCommand(): string {
-	return PICK_PYTHON + `"$py" -W ignore -c 'import importlib.util as u, sys; print(" ".join(m for m in sys.argv[1:] if u.find_spec(m) is None))' ${PYTHON_MODULES.join(' ')}`;
+/** Prints the modules of PYTHON_MODULES (and `extra`) the environment's Python cannot import. */
+export function missingModulesCommand(extra: string[] = []): string {
+	return PICK_PYTHON + `"$py" -W ignore -c 'import importlib.util as u, sys; print(" ".join(m for m in sys.argv[1:] if u.find_spec(m) is None))' ${[...PYTHON_MODULES, ...extra].join(' ')}`;
 }
 
 /** Runs the extension's media/platform.py (`read` or `check`) on a configuration, in X-HEEP's root. */
@@ -391,14 +397,17 @@ export function exceptionCause(mcause: number): string {
 export const printable = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f�]/g, '');
 
 export function buildCommand(o: Options): string {
-	return `make app ${appVars(o)}`;
+	// X-ALP (`linker`): ARCH and COMPILER_PREFIX in the environment are X-HEEP's (its container exports them), and
+	// its Makefile takes them over its own RV64 defaults.
+	return `${o.linker ? 'env -u ARCH -u COMPILER_PREFIX ' : ''}make app ${appVars(o)}`;
 }
 
 /**
- * A fusesoc build dir of the top-level system: X-HEEP's (openhwgroup.org_systems_core-v-mini-mcu_*) or a hardware
- * project's (x-heep_systems_gr-heep_*, renamed in its forks); not build/debug (DEBUG_BUILD_ROOT).
+ * A fusesoc build dir of the top-level system: X-HEEP's (openhwgroup.org_systems_core-v-mini-mcu_*), a hardware
+ * project's (x-heep_systems_gr-heep_*, renamed in its forks) or X-ALP's (x-heep_x-alp_x-alp_*); not build/debug
+ * (DEBUG_BUILD_ROOT).
  */
-export const isCoreBuildDir = (d: string) => d.includes('_systems_');
+export const isCoreBuildDir = (d: string) => d.includes('_systems_') || d.startsWith('x-heep_x-alp_x-alp_');
 
 /** Compiled model inside build/<fusesoc core dir>/; mcu-gen's `fusesoc --setup` creates the dirs empty. */
 export const SIM_MODEL: Record<Simulator, string> = {
@@ -406,9 +415,14 @@ export const SIM_MODEL: Record<Simulator, string> = {
 	questasim: 'sim-modelsim/work',
 };
 
-export function simModelBuildCommand(sim: Simulator): string {
+/**
+ * `xalpConfig`: X-ALP's, whose verilator-build regenerates the platform when a template changed (with this
+ * configuration then, not its default) and formats the whole repo first (-o format skips that: it may run on save).
+ */
+export function simModelBuildCommand(sim: Simulator, xalpConfig?: string): string {
+	const make = xalpConfig ? `make -o format ${sim}-build X_ALP_CFG='${xalpConfig}'` : `make ${sim}-build`;
 	// `make <sim>-build` pipes fusesoc into tee, so its exit code is always 0: drop the old model and check it came back.
-	return `rm -rf build/*/${SIM_MODEL[sim]} && make ${sim}-build && `
+	return `rm -rf build/*/${SIM_MODEL[sim]} && ${make} && `
 		+ `{ ls build/*/${SIM_MODEL[sim]} >/dev/null 2>&1 || { echo "Simulation model build failed, see buildsim.log"; exit 1; }; }`;
 }
 
@@ -419,10 +433,13 @@ export function incrementalBuildCommand(jobs: number): string {
 
 /**
  * Runs the compiled Verilator model directly, the same step `make verilator-run` does after fusesoc,
- * which first spends seconds resolving cores and rerunning generators.
+ * which first spends seconds resolving cores and rerunning generators. X-ALP's (`linker` given) loads the ELF
+ * into that memory, named by its suffix, and exits with the app's exit code.
  */
-export function verilatorRunCommand(simDir: string): string {
-	return `cd '${simDir}' && ./Vtestharness +firmware=../../../sw/build/main.hex`;
+export function verilatorRunCommand(simDir: string, linker?: string): string {
+	return linker
+		? `cd '${simDir}' && ./Vtestharness +BINARY=../../../sw/build/main.${linker}.elf +BOOTMODE=force --trace=false --no_err=false`
+		: `cd '${simDir}' && ./Vtestharness +firmware=../../../sw/build/main.hex`;
 }
 
 /** Separate fusesoc build root for the JTAG-enabled model, so the regular one stays untouched. */
@@ -433,15 +450,25 @@ export const DEBUG_BUILD_ROOT = 'build/debug';
  * Through make, not fusesoc directly: the boot ROM generator needs the toolchain prefix the Makefile exports.
  * Like `verilator-build` the exit code is always 0, hence the check on the model.
  */
-export function debugModelBuildCommand(): string {
+export function debugModelBuildCommand(soc: SocId = 'x-heep'): string {
 	const exe = `${DEBUG_BUILD_ROOT}/sim-verilator/Vtestharness`;
-	return `rm -f ${exe} && make verilator-build FUSESOC_FLAGS='--build-root ${DEBUG_BUILD_ROOT}' FUSESOC_PARAM='--JTAG_DPI=1' && `
-		+ `{ test -x ${exe} || { echo "Debug model build failed, see buildsim.log"; exit 1; }; }`;
+	// X-ALP's Makefile passes its fusesoc arguments after the core, where --build-root is not taken: fusesoc directly,
+	// picked as its Makefile does. mcu-gen already made what verilator-build depends on (boot ROM, registers).
+	const build = soc === 'x-alp'
+		? `{ if [ -n "$CONDA_DEFAULT_ENV" ]; then f=fusesoc; else f=.venv/bin/fusesoc; fi; "$f" --cores-root . run --no-export --target sim `
+			+ `--tool verilator --build-root ${DEBUG_BUILD_ROOT} --build x-heep:x-alp:x-alp:0.0.1 --USE_JTAG_DPI 2>&1 | tee buildsim.log; }`
+		: `make verilator-build FUSESOC_FLAGS='--build-root ${DEBUG_BUILD_ROOT}' FUSESOC_PARAM='--JTAG_DPI=1'`;
+	return `rm -f ${exe} && ${build} && { test -x ${exe} || { echo "Debug model build failed, see buildsim.log"; exit 1; }; }`;
 }
 
-/** Starts the debug model waiting for OpenOCD on port 4567; GDB then loads the firmware over JTAG. */
-export function debugSimCommand(simDir: string, hex: string): string {
-	return `cd '${simDir}' && ./Vtestharness +openOCD=true +firmware='${hex}'`;
+/**
+ * Starts the debug model waiting for OpenOCD on port 4567; GDB then loads the firmware over JTAG.
+ * X-ALP's (`linker` given) takes the ELF, named after the memory it is linked into, and preloads it.
+ */
+export function debugSimCommand(simDir: string, firmware: string, linker?: string): string {
+	return linker
+		? `cd '${simDir}' && ./Vtestharness +openOCD=true +BOOTMODE=jtag +BINARY='${firmware}' --trace=false`
+		: `cd '${simDir}' && ./Vtestharness +openOCD=true +firmware='${firmware}'`;
 }
 
 export function openocdCommand(openocd: string, config: string): string {
@@ -449,15 +476,15 @@ export function openocdCommand(openocd: string, config: string): string {
 }
 
 /**
- * Where the program ends: `_exit` gets the exit code in a0. `*_exit` is its first instruction, before a0 is reused;
- * a plain `_exit` breakpoint may land after the prologue.
+ * Where the program ends, with the exit code in a0 (Soc.exitSymbol: X-HEEP's `_exit`). `*sym` is its first
+ * instruction, before a0 is reused; a plain `sym` breakpoint may land after the prologue.
  */
-export const EXIT_BREAKPOINT = 'break *_exit';
+export const exitBreakpoint = (symbol = '_exit') => `break *${symbol}`;
 
-/** Loads the ELF over OpenOCD's GDB port, runs it to `_exit` and prints `XHEEP_EXIT <code>`. */
-export function gdbRunCommand(gdb: string, elf: string): string {
+/** Loads the ELF over OpenOCD's GDB port, runs it to its exit and prints `XHEEP_EXIT <code>`. */
+export function gdbRunCommand(gdb: string, elf: string, exitSymbol = '_exit'): string {
 	return `'${gdb}' -q -nx -batch '${elf}' -ex 'set remotetimeout 2000' -ex 'target extended-remote :3333' -ex load `
-		+ `-ex '${EXIT_BREAKPOINT}' -ex continue -ex 'printf "XHEEP_EXIT %d\\n", $a0'`;
+		+ `-ex '${exitBreakpoint(exitSymbol)}' -ex continue -ex 'printf "XHEEP_EXIT %d\\n", $a0'`;
 }
 
 /**
@@ -492,8 +519,8 @@ export function simCommand(o: Options): string {
 	return `make ${o.simulator}-run`;
 }
 
-export function mcuGenCommand(config: string): string {
-	return `make mcu-gen X_HEEP_CFG='${config}'`;
+export function mcuGenCommand(config: string, soc: SocId = 'x-heep'): string {
+	return `make mcu-gen ${SOCS[soc].configVar}='${config}'`;
 }
 
 /** Programs the already built firmware into the FPGA board's SPI flash. */
@@ -660,8 +687,9 @@ export function simSummary(out: string): { ok: boolean; text: string } {
 	if (outOfBound) {
 		return { ok: false, text: `memory access outside X-HEEP's memory map at ${outOfBound}` };
 	}
-	const cycles = /Simulation finished after (\d+) clock cycles/.exec(out)?.[1];
-	const value = /Program Finished with value (-?\d+)/.exec(out)?.[1];
+	// X-HEEP's testbench, then X-ALP's.
+	const cycles = /Simulation finished after (\d+) clock cycles/.exec(out)?.[1] ?? /Executed:\s+(\d+) cycles/.exec(out)?.[1];
+	const value = /Program Finished with value (-?\d+)/.exec(out)?.[1] ?? /Exit code: (-?\d+)/.exec(out)?.[1];
 	const text = value === undefined ? 'simulation failed' : `exit ${value}${cycles ? ` · ${cycles} cycles` : ''}`;
 	return { ok: value === '0', text };
 }

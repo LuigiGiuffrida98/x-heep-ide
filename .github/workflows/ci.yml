@@ -54,6 +54,26 @@ jobs:
         shell: bash -le {0} # login shell: the image activates conda and its tools in /etc/profile.d
         run: 'XHEEP_COMMIT=$(cat XHEEP_COMMIT) "$NODE" out/test/e2e.js "$RUNNER_TEMP/project"'
 
+  # The same steps against X-ALP's latest main, in the image X-ALP's own CI uses (`latest`: X-ALP has no release
+  # tags yet). Not required to publish: X-ALP's main moves on its own.
+  e2e-xalp:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/x-heep/x-heep/x-heep-toolchain:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci && npm run compile-tests && echo "NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - name: X-ALP software project end to end
+        shell: bash -le {0}
+        # X-ALP's Python requirements (those of the X-HEEP it vendors) go beyond the image's, as in X-ALP's own CI.
+        run: |
+          pip install -r https://raw.githubusercontent.com/x-heep/x-alp/main/hw/vendor/x-heep/util/python-requirements.txt
+          RISCV_XALP=$RISCV_XHEEP XHEEP_SOC=x-alp "$NODE" out/test/e2e.js "$RUNNER_TEMP/project"
+
   publish:
     needs: [test, e2e]
     if: startsWith(github.ref, 'refs/tags/v')

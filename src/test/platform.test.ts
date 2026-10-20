@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { Platform, Catalog, formFromPlatform, plainMemory, hardwareFingerprint, archFor, hardwareChanges, formProblems, overlayConfig, overlayHeader, mapNodes } from '../platform';
+import { Platform, Catalog, formFromPlatform, plainMemory, hardwareFingerprint, archFor, hardwareChanges, formProblems, overlayConfig, overlayHeader, mapNodes, xalpForm, xalpOverlayConfig } from '../platform';
 
 // What media/platform.py reads from X-HEEP's configs/general.py and configs/example_interleaved.hjson.
 const general: Platform = {
@@ -104,5 +104,48 @@ suite('Memory map', () => {
 		assert.strictEqual(ctrl.define, 'SPI_FLASH_START_ADDRESS + SPI_HOST_CTRL_REG_OFFSET');
 		assert.deepStrictEqual([nodes[0].define, nodes[2].define], ['RAM0_START_ADDRESS', 'PERIPHERAL_START_ADDRESS']);
 		assert.deepStrictEqual(ctrl.children.map(f => f.description), ['[0] rw', '[31:16] rw']);
+	});
+});
+
+suite('X-ALP memory map', () => {
+	test('SPM and DRAM, then the regions; defines as in core_v_mcu.h', () => {
+		const nodes = mapNodes({
+			banks: [{ name: 'spm', start: 0x10000000, length: 1 << 18 }, { name: 'dram', start: 0x80000000, length: 1 << 28 }],
+			regions: [{ name: 'debug', start: 0, length: 1 << 20 }, { name: 'ext_slaves', start: 0xf0000000, length: 1 << 24 }],
+			domains: [{ name: 'peripheral_domain', start: 0x20000000, length: 1 << 20, peripherals: [{
+				name: 'axi_llc', ip: 'axi_llc', start: 0x20050000, length: 65536, registers: [{ name: 'CFG_SPM_LOW', offset: 0, desc: '', access: 'rw', fields: [] }],
+			}] }],
+		}, 'x-alp');
+		assert.deepStrictEqual(nodes[0].children.map(n => n.define), ['LLC_START_ADDRESS', 'DRAM_START_ADDRESS']);
+		assert.deepStrictEqual(nodes.slice(1).map(n => n.define), ['DEBUG_START_ADDRESS', 'PERIPHERAL_DOMAIN_START_ADDRESS', 'EXT_SLAVES_START_ADDRESS']);
+		assert.strictEqual(nodes[2].children[0].children[0].define, 'AXI_LLC_START_ADDRESS + AXI_LLC_CFG_SPM_LOW_REG_OFFSET');
+	});
+});
+
+suite('X-ALP platform editor', () => {
+	const catalog = { peripherals: [
+		{ name: 'pad_control', cls: 'Pad_control', pkg: 'peripherals.base_peripherals', doc: '' },
+		{ name: 'uart', cls: 'UART', pkg: 'peripherals.user_peripherals', doc: '' },
+	] };
+	const base = xalpForm({ cpu: 'cva6', llc: { ways: 16, lines: 256, blocks: 8, dataWidth: 64, dramSize: 1 << 28 },
+		peripherals: ['soc_ctrl', 'bootrom', 'uart', 'axi_llc'] }, catalog);
+
+	test('the form holds the cache geometry, the DRAM in MB and the optional peripherals', () => {
+		assert.deepStrictEqual(base, { ways: 16, lines: 256, blocks: 8, dramMb: 256, peripherals: ['uart'] });
+	});
+
+	test('the overlay writes only what changed', () => {
+		assert.ok(!xalpOverlayConfig('x', 'soc.py', base, base, catalog).includes('system.get_cache()'), 'no change, no new cache');
+		const cache = xalpOverlayConfig('x', 'soc.py', base, { ...base, ways: 8, dramMb: 512 }, catalog);
+		assert.ok(cache.includes('set_assoc=8, num_lines=256, num_blocks=8') && cache.includes('cached_size=0x20000000'));
+		// The cache is also a peripheral: its domain gets the new one.
+		assert.ok(cache.includes('llc if p.get_name() == "axi_llc" else p'));
+	});
+
+	test('peripherals: removed by name, added to the domain of soc_ctrl', () => {
+		const src = xalpOverlayConfig('x', 'soc.py', base, { ...base, peripherals: ['pad_control'] }, catalog);
+		assert.ok(src.includes('if p.get_name() not in ("uart",)'));
+		assert.ok(src.includes('from peripherals.base_peripherals import Pad_control') && src.includes('peripherals += [Pad_control()]'));
+		assert.ok(!src.includes('LLC('), 'the cache is kept as is');
 	});
 });

@@ -1,4 +1,4 @@
-# Reads and checks X-HEEP platform configurations for the X-HEEP IDE platform editor, with X-HEEP's own
+# Reads and checks X-HEEP (and X-ALP) platform configurations for the X-HEEP IDE platform editor, with X-HEEP's own
 # generator (util/xheep_gen), so the editor shows what mcu-gen would build and never reimplements it.
 #
 #   python platform.py read  <x-heep root> <config>   -> JSON: effective values and what can be chosen
@@ -50,6 +50,37 @@ def read(xheep):
         "heap": xheep.heap_size(),
         "userPeripherals": [p.get_name() for p in xheep.get_user_peripheral_domain().get_peripherals()],
     }
+
+
+def read_xalp(soc):
+    """X-ALP's knobs: the last-level cache (its geometry sizes the SPM, it caches the DRAM) and the peripherals."""
+    llc = soc.get_cache()
+    return {
+        "cpu": soc.cpu().get_name(),
+        "llc": {
+            "ways": llc.get_set_assoc(),
+            "lines": llc.get_num_lines(),
+            "blocks": llc.get_num_blocks(),
+            "dataWidth": llc._data_width,
+            "dramSize": llc._cached_size,
+        },
+        "peripherals": soc.get_configured_peripheral_names(),
+    }
+
+
+def catalog_xalp(soc):
+    """The peripherals an X-ALP configuration may leave out, with the module defining each."""
+    import peripherals.base_peripherals as bp
+    import peripherals.user_peripherals as up
+
+    optional = set(soc.AVAILABLE_PERIPHERALS) - set(soc.MINIMUM_PERIPHERALS) - {"axi_llc"}
+    found = {
+        obj._name: {"name": obj._name, "cls": name, "pkg": pkg.__name__, "doc": (inspect.getdoc(obj) or "").split("\n")[0].strip()}
+        for pkg in (bp, up)
+        for name, obj in vars(pkg).items()
+        if inspect.isclass(obj) and getattr(obj, "_name", None) in optional
+    }
+    return {"peripherals": sorted(found.values(), key=lambda p: p["name"])}
 
 
 # Peripherals that are instances of an IP with another name. Bootrom and ext_peripheral have no registers.
@@ -108,7 +139,9 @@ def build(xheep, root):
 def address_map(xheep, root):
     """Where everything is, as mcu-gen builds it: RAM banks, address regions, peripheral domains."""
     build(xheep, root)
-    sys.path.insert(0, f"{root}/hw/vendor/pulp_platform/register_interface/vendor/lowrisc_opentitan/util")
+    # reggen, where X-HEEP and X-ALP (from its vendored X-HEEP IPs) keep it.
+    for vendor in ("hw/vendor", "hw/vendor/x-heep"):
+        sys.path.insert(0, f"{root}/{vendor}/pulp_platform/register_interface/vendor/lowrisc_opentitan/util")
     files = register_files(root)
 
     def regs(name):
@@ -119,10 +152,21 @@ def address_map(xheep, root):
             return []
 
     # The domains' regions of the address map: older X-HEEPs (e.g. vendored by gr-heep) give domains no name or address.
-    domains = {"base_peripheral_domain": xheep.get_base_peripheral_domain(), "user_peripheral_domain": xheep.get_user_peripheral_domain()}
+    if hasattr(xheep, "get_domains"):  # X-ALP: any number of domains, each a region of the address map
+        domains = {d.get_name(): d for d in xheep.get_domains()}
+    else:
+        domains = {"base_peripheral_domain": xheep.get_base_peripheral_domain(), "user_peripheral_domain": xheep.get_user_peripheral_domain()}
     regions = xheep.address_map().get_regions()
+    if hasattr(xheep, "get_cache"):  # X-ALP: the last-level cache's scratchpad, and the DRAM it caches
+        llc = xheep.get_cache()
+        banks = [
+            {"name": "spm", "start": llc._spm_start, "length": llc.get_spm_size()},
+            {"name": "dram", "start": llc._cached_start, "length": llc._cached_size},
+        ]
+    else:
+        banks = [{"name": f"ram{b.name()}", "start": b.start_address(), "length": b.size()} for b in xheep.memory_ss().iter_ram_banks()]
     return {
-        "banks": [{"name": f"ram{b.name()}", "start": b.start_address(), "length": b.size()} for b in xheep.memory_ss().iter_ram_banks()],
+        "banks": banks,
         "regions": [{"name": r.get_name(), "start": r.get_start_address(), "length": r.get_length()} for r in regions if r.get_name() not in domains],
         "domains": [
             {
@@ -157,7 +201,10 @@ def main():
             import load_config
 
             xheep = load_config.load_cfg_file(PurePath(config))
-            if cmd == "read":
+            if cmd == "read" and hasattr(xheep, "get_cache"):  # X-ALP
+                out["platform"] = read_xalp(xheep)
+                out["catalog"] = catalog_xalp(xheep)
+            elif cmd == "read":
                 out["platform"] = read(xheep)
                 out["catalog"] = catalog()
             elif cmd == "map":

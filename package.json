@@ -24,7 +24,9 @@
   "activationEvents": [
     "workspaceContains:util/xheep_gen/mcu_gen.py",
     "workspaceContains:x-heep/util/xheep_gen/mcu_gen.py",
-    "workspaceContains:hw/vendor/x-heep/util/xheep_gen/mcu_gen.py"
+    "workspaceContains:hw/vendor/x-heep/util/xheep_gen/mcu_gen.py",
+    "workspaceContains:xalp.core",
+    "workspaceContains:x-alp/xalp.core"
   ],
   "main": "./dist/extension.js",
   "scripts": {
@@ -77,7 +79,13 @@
       },
       {
         "command": "xheep.newProject",
-        "title": "New Software Project",
+        "title": "New X-HEEP Software Project",
+        "category": "X-HEEP",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "xheep.newXalpProject",
+        "title": "New X-ALP Software Project",
         "category": "X-HEEP",
         "icon": "$(new-folder)"
       },
@@ -260,6 +268,11 @@
           "group": "1_project@1"
         },
         {
+          "command": "xheep.newXalpProject",
+          "when": "view == xheep.apps",
+          "group": "1_project@1.5"
+        },
+        {
           "command": "xheep.newHwProject",
           "when": "view == xheep.apps",
           "group": "1_project@2"
@@ -291,17 +304,17 @@
         },
         {
           "command": "xheep.openSerial",
-          "when": "view == xheep.apps && xheep.active",
+          "when": "view == xheep.apps && xheep.active && xheep.isXheep",
           "group": "2_run@2"
         },
         {
           "command": "xheep.programFpga",
-          "when": "view == xheep.apps && xheep.active",
+          "when": "view == xheep.apps && xheep.active && xheep.isXheep",
           "group": "2_run@3"
         },
         {
           "command": "xheep.buildBitstream",
-          "when": "view == xheep.apps && xheep.active && xheep.hasVivado",
+          "when": "view == xheep.apps && xheep.active && xheep.hasVivado && xheep.isXheep",
           "group": "3_platform@5"
         },
         {
@@ -392,7 +405,7 @@
         },
         {
           "command": "xheep.openSerial",
-          "when": "xheep.active"
+          "when": "xheep.active && xheep.isXheep"
         },
         {
           "command": "xheep.mcuGen",
@@ -420,11 +433,11 @@
         },
         {
           "command": "xheep.programFpga",
-          "when": "xheep.active"
+          "when": "xheep.active && xheep.isXheep"
         },
         {
           "command": "xheep.buildBitstream",
-          "when": "xheep.active && xheep.hasVivado"
+          "when": "xheep.active && xheep.hasVivado && xheep.isXheep"
         },
         {
           "command": "xheep.editPlatform",
@@ -622,7 +635,7 @@
       {
         "view": "xheep.apps",
         "when": "!xheep.active",
-        "contents": "No X-HEEP repository found in this folder.\n[New Software Project](command:xheep.newProject)\nKeeps your apps in this folder and adds X-HEEP in x-heep/.\n[New Hardware Project](command:xheep.newHwProject)\nClones gr-heep to extend X-HEEP with your own hardware.\n[Open X-HEEP Folder](command:vscode.openFolder)"
+        "contents": "No X-HEEP or X-ALP repository found in this folder.\n[New X-HEEP Software Project](command:xheep.newProject)\n[New X-ALP Software Project](command:xheep.newXalpProject)\nKeeps your apps in this folder and adds X-HEEP in x-heep/ (or X-ALP in x-alp/).\n[New Hardware Project](command:xheep.newHwProject)\nClones gr-heep to extend X-HEEP with your own hardware.\n[Open X-HEEP Folder](command:vscode.openFolder)"
       }
     ]
   }

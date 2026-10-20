@@ -40,7 +40,7 @@ For changes to the X-HEEP RTL:
   files), and formatting on save as X-HEEP's `util/format-verible` does, only in the folders it covers
   (`xheep.formatRtlOnSave`).
 - **Memory Map** view: RAM, address regions, peripherals, and their registers and fields from the regtool
-  descriptions, with absolute addresses to copy.
+  descriptions. Copy Address copies the C define (`UART_START_ADDRESS + UART_CTRL_REG_OFFSET`).
 - **App regression** in the Testing view: runs the apps on the simulation model of the active platform. An app
   passes when it exits with 0. Apps X-HEEP's own app test leaves out are skipped, unless you run them one by one.
 
@@ -54,7 +54,7 @@ configuration does not match the hardware of the bitstream.
 
 ## Software-only projects
 
-Run **X-HEEP: New Software Project** in an empty folder to keep your apps in your own repo, with X-HEEP added
+Run **X-HEEP: New X-HEEP Software Project** in an empty folder to keep your apps in your own repo, with X-HEEP added
 as a git submodule (or a link to an existing clone) in `x-heep/`.
 **Update X-HEEP** moves that submodule to the latest X-HEEP commit tested with the extension, or to `main`.
 
@@ -66,6 +66,17 @@ module `my_chip`, core `x-heep:systems:my-chip`. The extension works in gr-heep 
 its forks (X-HEEP vendored in `hw/vendor/x-heep`): mcu-gen, the simulation models and the bitstream are built with
 the project's Makefile, the configuration defaults to `config/mcu-gen-config.py`, and apps go in `sw/applications`.
 Update the vendored X-HEEP with `make vendor-update`.
+
+## X-ALP
+
+The extension also works with [X-ALP](https://github.com/x-heep/x-alp) (CVA6, RV64), opened as a clone or as a
+software project from **New X-ALP Software Project** (X-ALP in `x-alp/`). Build and Run work in simulation
+(Verilator), from the SPM or from the DRAM: pick it in the status bar. Debug starts X-ALP's JTAG model, OpenOCD and
+GDB, but X-ALP's JTAG debugging does not run programs to the end in simulation yet. The Memory Map view shows the SPM, the DRAM
+and the peripherals. The platform editor has X-ALP's knobs: the cache geometry (which sizes the SPM), the DRAM and
+the peripherals. FPGA and flash are X-HEEP's only for now, and the stack checks are off
+(X-ALP's Makefile takes no extra compiler flags). `XHEEP_SOC=x-alp node out/test/e2e.js` runs the end-to-end test
+against X-ALP.
 
 ## Settings
 

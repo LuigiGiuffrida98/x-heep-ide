@@ -9,7 +9,8 @@ import { changedFiles, isGenerated, updateCommand, Options, buildCommand, simCom
 	gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
 	condaEnvName, requiredVersions, verilatorVersion, veribleVersion, usbDevices, udevRule, missingModulesCommand,
-	boardAdapters, pickAdapter, hdlProblems, veribleFileList, formattedDirs, appTestConfig, renameGrHeep, isHwProjectName } from '../xheep';
+	boardAdapters, pickAdapter, hdlProblems, veribleFileList, formattedDirs, appTestConfig, renameGrHeep, isHwProjectName, writeMain, linkerScript, isCoreBuildDir } from '../xheep';
+import { SOCS, socOf } from '../soc';
 
 const base: Options = { project: 'hello_world', mode: 'sim', compiler: 'gcc', board: 'pynq-z2', simulator: 'verilator' };
 
@@ -238,6 +239,7 @@ suite('Environment check', () => {
 	test('checks the Python packages in the environment python', () => {
 		assert.ok(missingModulesCommand().includes('hjson mako fusesoc edalize pkg_resources'));
 		assert.ok(missingModulesCommand().includes('.venv/bin/python'));
+		assert.ok(missingModulesCommand(['tabulate']).includes('pkg_resources tabulate'), 'X-ALP needs more');
 	});
 
 	test('lists USB devices from sysfs with their device node', () => {
@@ -388,5 +390,63 @@ suite('Hardware project', () => {
 	test('takes names that make SystemVerilog identifiers', () => {
 		assert.deepStrictEqual(['my-chip', 'soc2', 'a_b', 'My-chip', '2soc', 'my--chip', 'my-', 'x-heep', 'my chip'].map(isHwProjectName),
 			[true, true, true, false, false, false, false, false, false]);
+	});
+});
+
+suite('X-ALP', () => {
+	const xalp: Options = { ...base, linker: 'spm' };
+
+	test('told apart from X-HEEP, which it vendors the generator of', () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xalp-'));
+		fs.mkdirSync(path.join(dir, 'util', 'xheep_gen'), { recursive: true });
+		fs.writeFileSync(path.join(dir, 'util', 'xheep_gen', 'mcu_gen.py'), '');
+		assert.strictEqual(socOf(dir), undefined);
+		fs.writeFileSync(path.join(dir, 'xalp.core'), '');
+		assert.strictEqual(socOf(dir)?.id, 'x-alp');
+		fs.rmSync(path.join(dir, 'xalp.core'));
+		fs.mkdirSync(path.join(dir, 'hw', 'core-v-mini-mcu'), { recursive: true });
+		assert.strictEqual(socOf(dir)?.id, 'x-heep');
+	});
+
+	test('apps link into the memory chosen, with its own -mabi=lp64d flags', () => {
+		assert.strictEqual(buildCommand({ ...xalp, linker: 'dram', source: '../../sw' }),
+			'env -u ARCH -u COMPILER_PREFIX make app PROJECT=hello_world TARGET=sim LINKER=dram COMPILER=gcc SOURCE=../../sw');
+		assert.strictEqual(linkerScript(xalp), 'spm.ld');
+		assert.strictEqual(linkerScript(base), 'link.ld');
+	});
+
+	test('mcu-gen takes the configuration as X_ALP_CFG', () => {
+		assert.strictEqual(mcuGenCommand('/p/configs/soc.py', 'x-alp'), "make mcu-gen X_ALP_CFG='/p/configs/soc.py'");
+	});
+
+	test('the model is built with the configuration and without formatting the repo', () => {
+		assert.ok(simModelBuildCommand('verilator', '/p/c.py').includes("make -o format verilator-build X_ALP_CFG='/p/c.py'"));
+		assert.ok(isCoreBuildDir('x-heep_x-alp_x-alp_0.0.1') && isCoreBuildDir('openhwgroup.org_systems_core-v-mini-mcu_1.0.6') && !isCoreBuildDir('debug'));
+	});
+
+	test('the model loads the ELF named after its memory and exits with the app\'s code', () => {
+		assert.strictEqual(verilatorRunCommand('/m', 'dram'),
+			"cd '/m' && ./Vtestharness +BINARY=../../../sw/build/main.dram.elf +BOOTMODE=force --trace=false --no_err=false");
+		const out = '[ OK! ] Exit code: 0\n\n  Executed:          66524 cycles\n';
+		assert.deepStrictEqual(simSummary(out), { ok: true, text: 'exit 0 · 66524 cycles' });
+		assert.deepStrictEqual(simSummary('\x1b[1;33m[WARN ]\x1b[0m Exit code: 3\n'), { ok: false, text: 'exit 3' });
+	});
+
+	test('debugging builds a JTAG DPI model and boots it over JTAG', () => {
+		const cmd = debugModelBuildCommand('x-alp');
+		assert.ok(cmd.includes('--build-root build/debug --build x-heep:x-alp:x-alp:0.0.1 --USE_JTAG_DPI'));
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xalp-'));
+		assert.strictEqual(spawnSync('/bin/bash', ['-c', cmd.replace(/\{ if \[.*?tee buildsim.log; \}/, 'true')], { cwd: dir }).status, 1);
+		assert.strictEqual(debugSimCommand('/m', '/x/sw/build/main.spm.elf', 'spm'),
+			"cd '/m' && ./Vtestharness +openOCD=true +BOOTMODE=jtag +BINARY='/x/sw/build/main.spm.elf' --trace=false");
+		// main returns into crt0, with the exit code in a0; _exit is only linked when the app calls exit().
+		assert.ok(gdbRunCommand('gdb', 'e', SOCS['x-alp'].exitSymbol).includes("-ex 'break *_crt_return' -ex continue"));
+	});
+
+	test('new projects and apps', () => {
+		assert.ok(cloneCommand('https://x', undefined, 'x-alp').includes('git submodule add --progress --depth 1 https://x x-alp'));
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'xalp-'));
+		writeMain(dir, 'hi', 'x-alp');
+		assert.ok(fs.readFileSync(path.join(dir, 'main.c'), 'utf8').startsWith('#include "printf.h"\n'), 'X-ALP printf is its own');
 	});
 });

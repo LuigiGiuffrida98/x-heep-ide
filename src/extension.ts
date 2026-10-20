@@ -10,18 +10,19 @@ import {
 	xheepVerilatorVersion, verilatorPrefix, verilatorInstallCommand, veriblePrefix, veribleInstallCommand,
 	toolchainUrl, toolchainInstallCommand, packageInstallCommand, devcontainerJson, xheepImageTag,
 } from './tools';
+import { SOCS, Soc, socOf } from './soc';
 import { Mode, MODES, JTAG_ADAPTERS, Adapter, boardAdapters, pickAdapter, Options, Simulator, SIM_MODEL, buildCommand, simCommand, simModelBuildCommand, FLASH_COMMAND, mcuGenCommand, simSummary, incrementalBuildCommand, verilatorRunCommand,
 	DEBUG_BUILD_ROOT, debugModelBuildCommand, debugSimCommand, openocdCommand,
-	XHEEP_GIT, GRHEEP_GIT, XHEEP_COMMIT_URL, isCoreBuildDir, hwProjectCloneCommand, isHwProjectName, renameHwProject, isCommit, cloneCommand, changedFiles, isGenerated, updateCommand, writeMain, projectSource, configTemplate,
+	GRHEEP_GIT, XHEEP_COMMIT_URL, isCoreBuildDir, hwProjectCloneCommand, isHwProjectName, renameHwProject, isCommit, cloneCommand, changedFiles, isGenerated, updateCommand, writeMain, projectSource, configTemplate,
 	Programmer, BOARDS, BitstreamInfo, fileSha1, builtBitstream, bitstreamBuildCommand, vivadoTcl, vivadoCommand, openocdFpgaCommand,
-	EXIT_BREAKPOINT, gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
+	exitBreakpoint, gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	linkerScript, memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
 	SETUP_GUIDE, missingModulesCommand, condaEnvName, requiredVersions, verilatorVersion, veribleVersion,
 	usbDevices, udevRule, EPFL_PROGRAMMER_USB, platformScriptCommand, largestFrame,
 	hdlProblems, veribleFileList, formattedDirs, appTestConfig, BuildProblem } from './xheep';
-import { Platform, Catalog, PlatformForm, formFromPlatform, plainMemory, hardwareFingerprint, archFor, overlayConfig, overlayHeader,
+import { Platform, Catalog, PlatformForm, XalpPlatform, XalpCatalog, XalpForm, xalpForm, xalpOverlayConfig, formFromPlatform, plainMemory, hardwareFingerprint, archFor, overlayConfig, overlayHeader,
 	MapNode, mapNodes, hexAddress } from './platform';
-import { EditorState, openPlatformEditor, refreshPlatformEditor } from './platformEditor';
+import { EditorState, XalpEditorState, openPlatformEditor, refreshPlatformEditor } from './platformEditor';
 
 let extensionDir: string;
 let extensionId: string;
@@ -30,6 +31,8 @@ let folder: vscode.WorkspaceFolder;
 let root: string;
 /** Where the hardware is generated and built (make mcu-gen, fusesoc's build/): X-HEEP, or the hardware project (gr-heep). */
 let hwRoot: string;
+/** The platform at `root`: X-HEEP or X-ALP. */
+let soc: Soc;
 /** The sw/ dir holding the user's apps: X-HEEP's own, or the software project's. */
 let swRoot: string;
 let state: vscode.Memento;
@@ -89,7 +92,7 @@ function loadExamples(): Promise<void> {
 const expandHome = (p: string) => p.replace(/^~(?=$|\/)/, os.homedir());
 
 function toolchain(): string {
-	return expandHome(cfg().get<string>('riscvToolchain') || process.env.RISCV_XHEEP || '~/.riscv');
+	return expandHome(cfg().get<string>('riscvToolchain') || process.env[soc?.toolchainVar ?? 'RISCV_XHEEP'] || process.env.RISCV_XHEEP || '~/.riscv');
 }
 
 /** A tool's executable: its `xheep.<key>` setting (the executable or its folder), else `name` from PATH. */
@@ -118,8 +121,12 @@ function simBuilt(sim: Simulator): boolean {
 	return fs.existsSync(build) && fs.readdirSync(build).some(d => isCoreBuildDir(d) && fs.existsSync(path.join(build, d, SIM_MODEL[sim])));
 }
 
+/** X-ALP: the memory apps are linked into and run from. */
+const currentLinker = () => soc.linkers && state.get<string>('linker', soc.linkers[0]);
+
 function options(project = currentApp(), mode = currentMode()): Options {
-	const simulator = cfg().get<Simulator>('simulator', 'verilator');
+	// X-ALP simulates with Verilator only.
+	const simulator = soc.linkers ? 'verilator' : cfg().get<Simulator>('simulator', 'verilator');
 	return {
 		project,
 		mode,
@@ -128,6 +135,7 @@ function options(project = currentApp(), mode = currentMode()): Options {
 		simulator,
 		source: isProjectApp(project) ? projectSource(root, swRoot) : undefined,
 		arch: state.get<string>('platformArch'),
+		linker: currentLinker(),
 	};
 }
 
@@ -141,7 +149,7 @@ const userConfigsDir = () => path.join(projectDir(), isHwProject() ? 'config' : 
 function configPath(): string {
 	const set = cfg().inspect<string>('mcuConfig');
 	const c = set?.workspaceFolderValue ?? set?.workspaceValue ?? set?.globalValue
-		?? (isHwProject() ? 'config/mcu-gen-config.py' : 'configs/general.py');
+		?? (isHwProject() ? 'config/mcu-gen-config.py' : soc.defaultConfig);
 	return [projectDir(), root].map(d => path.resolve(d, c)).find(fs.existsSync) ?? path.resolve(root, c);
 }
 
@@ -158,7 +166,7 @@ function platformStamp(): string {
 }
 
 const platformReady = () => state.get('platformStamp') === platformStamp()
-	&& fs.existsSync(path.join(root, 'hw', 'core-v-mini-mcu', 'include', 'core_v_mini_mcu_pkg.sv'));
+	&& fs.existsSync(path.join(root, soc.generated));
 const modelKey = (sim: Simulator) => `modelStamp.${sim}`;
 const modelReady = (sim: Simulator) => simBuilt(sim) && state.get(modelKey(sim)) === state.get('platformStamp') && !rtlChangedSince(sim);
 
@@ -203,7 +211,7 @@ const showTaskLog = (task: vscode.Task) => vscode.window.terminals.find(t => t.n
 async function generatePlatform(silent: boolean): Promise<boolean> {
 	const stamp = platformStamp();
 	const config = configPath();
-	const ok = await runQuiet(`Generating platform (${path.basename(config)})`, makeTask('mcu-gen', mcuGenCommand(config), false, {}, hwRoot), silent);
+	const ok = await runQuiet(`Generating platform (${path.basename(config)})`, makeTask('mcu-gen', mcuGenCommand(config, soc.id), false, {}, hwRoot), silent);
 	if (ok) {
 		await state.update('platformStamp', stamp);
 		// Apps use what the platform offers, e.g. a hardware FPU.
@@ -239,7 +247,7 @@ async function buildModel(sim: Simulator, silent: boolean): Promise<boolean> {
 	}
 	const build = (async () => {
 		savedDuringBuild.delete(sim);
-		const task = makeTask(`Build ${sim} model`, simModelBuildCommand(sim), false, {}, hwRoot);
+		const task = makeTask(`Build ${sim} model`, simModelBuildCommand(sim, soc.linkers && configPath()), false, {}, hwRoot);
 		const ok = await runQuiet(`Building ${sim} model`, task, silent, false);
 		if (ok) {
 			await state.update(modelKey(sim), state.get('platformStamp'));
@@ -311,7 +319,7 @@ async function selectConfig() {
 		items.push(...mine.map(c => ({ label: c.name, description: path.relative(projectDir(), c.file), file: c.file, buttons: overlayOf(c.file) ? [edit] : [] })));
 	}
 	items.push({ label: '', kind: vscode.QuickPickItemKind.Separator },
-		{ label: '$(add) New configuration (Python)…', detail: 'Starts from X-HEEP\'s general.py, to edit as code', run: newConfig },
+		{ label: '$(add) New configuration (Python)…', detail: `Starts from ${soc.name}'s ${path.basename(soc.defaultConfig)}, to edit as code`, run: newConfig },
 		{ label: '$(beaker) New configuration with the editor…', detail: 'Experimental: a form, saved as a Python configuration', run: () => openEditor() });
 	const pick = vscode.window.createQuickPick<Item>();
 	pick.items = items;
@@ -344,7 +352,7 @@ async function newConfig() {
 	}
 	const file = path.join(userConfigsDir(), `${name}.py`);
 	fs.mkdirSync(userConfigsDir(), { recursive: true });
-	fs.writeFileSync(file, configTemplate(root, name));
+	fs.writeFileSync(file, configTemplate(root, name, soc.defaultConfig));
 	await cfg().update('mcuConfig', path.relative(projectDir(), file), vscode.ConfigurationTarget.Workspace);
 	await vscode.window.showTextDocument(vscode.Uri.file(file));
 }
@@ -363,20 +371,26 @@ const overlayOf = (file: string) => file.endsWith('.py') ? overlayHeader(readTex
 /** The configuration an overlay builds on; for any other configuration, itself. */
 const baseOf = (file: string) => { const h = overlayOf(file); return h ? path.resolve(path.dirname(file), h.base) : file; };
 
-async function loadEditor(): Promise<EditorState | { error: string }> {
+async function loadEditor(): Promise<EditorState | XalpEditorState | { error: string }> {
 	const source = editorSource();
 	const read = await readPlatform(source);
 	if ('error' in read) {
-		return { error: `X-HEEP's generator cannot read ${path.basename(source)}: ${read.error}` };
+		return { error: `${soc.name}'s generator cannot read ${path.basename(source)}: ${read.error}` };
+	}
+	const rel = (f: string) => path.relative(projectDir(), f);
+	const mode = 'edit' in editorMode ? 'edit' : 'create';
+	const name = path.basename(source).replace(/\.(py|hjson)$/, '');
+	if (soc.id === 'x-alp') {
+		const { platform, catalog } = read as unknown as { platform: XalpPlatform; catalog: XalpCatalog };
+		return { xalp: true, mode, name, file: rel(source), base: rel(baseOf(source)), form: xalpForm(platform, catalog), platform, catalog };
 	}
 	const bitstream = bitstreamFile();
 	const app = appDir(currentApp());
 	const appReal = fs.existsSync(app) ? fs.realpathSync(app) : app;
 	const frame = largestFrame(stackUsage(), f => { try { return fs.realpathSync(f).startsWith(appReal + path.sep); } catch { return false; } });
-	const rel = (f: string) => path.relative(projectDir(), f);
 	return {
-		mode: 'edit' in editorMode ? 'edit' : 'create',
-		name: path.basename(source).replace(/\.(py|hjson)$/, ''),
+		mode,
+		name,
 		file: rel(source),
 		base: rel(baseOf(source)),
 		form: formFromPlatform(read.platform),
@@ -394,7 +408,7 @@ async function loadEditor(): Promise<EditorState | { error: string }> {
  * Writes the form as an overlay on the base: in place when editing one, else under a new name, which becomes the
  * active configuration. xheep_gen checks it first; resolves with its complaint, if any.
  */
-async function applyEditor(form: PlatformForm): Promise<{ error?: string; cancelled?: boolean }> {
+async function applyEditor(form: PlatformForm | XalpForm): Promise<{ error?: string; cancelled?: boolean }> {
 	const source = editorSource();
 	let target = source;
 	if (!('edit' in editorMode)) {
@@ -415,8 +429,11 @@ async function applyEditor(form: PlatformForm): Promise<{ error?: string; cancel
 	if ('error' in read) {
 		return { error: `cannot read ${path.basename(base)}: ${read.error}` };
 	}
-	const src = overlayConfig(path.basename(target, '.py'), path.relative(path.dirname(target), base),
-		formFromPlatform(read.platform), form, read.catalog, plainMemory(read.platform));
+	const [stem, baseRel] = [path.basename(target, '.py'), path.relative(path.dirname(target), base)];
+	const xalp = read as unknown as { platform: XalpPlatform; catalog: XalpCatalog };
+	const src = soc.id === 'x-alp'
+		? xalpOverlayConfig(stem, baseRel, xalpForm(xalp.platform, xalp.catalog), form as XalpForm, xalp.catalog)
+		: overlayConfig(stem, baseRel, formFromPlatform(read.platform), form as PlatformForm, read.catalog, plainMemory(read.platform));
 	// Checked in place, as mcu-gen would build it, so its path to the base resolves the same.
 	fs.mkdirSync(path.dirname(target), { recursive: true });
 	const draft = path.join(path.dirname(target), `.${path.basename(target, '.py')}.check.py`);
@@ -449,7 +466,7 @@ function openEditor(file = configPath()) {
 			}
 		},
 		openFile: () => vscode.window.showTextDocument(vscode.Uri.file(editorSource())),
-	});
+	}, soc.id === 'x-alp');
 	refreshPlatformEditor(); // already open: show the new subject
 }
 
@@ -655,7 +672,7 @@ function withEnvSetup(cmd: string): string {
 function taskEnv(): Record<string, string> {
 	// CMake reads this env var, so every app build drops sw/build/compile_commands.json for IntelliSense.
 	return {
-		RISCV_XHEEP: toolchain(), CMAKE_EXPORT_COMPILE_COMMANDS: 'ON',
+		RISCV_XHEEP: toolchain(), RISCV_XALP: toolchain(), CMAKE_EXPORT_COMPILE_COMMANDS: 'ON',
 		PATH: [...toolDirs(), process.env.PATH ?? ''].join(path.delimiter),
 	};
 }
@@ -711,7 +728,7 @@ async function newApp() {
 	if (!name) {
 		return;
 	}
-	writeMain(path.join(userAppsDir(), name), name);
+	writeMain(path.join(userAppsDir(), name), name, soc.id);
 	await selectApp(name);
 }
 
@@ -765,9 +782,9 @@ async function pinnedCommit(): Promise<string | undefined> {
 	}
 }
 
-/** X-HEEP is the submodule the extension added to a software project (not the user's own clone, opened or linked). */
+/** The platform is the submodule the extension added to a software project (not the user's own clone, opened or linked). */
 const managedXheep = () => isProject() && !isHwProject() && !fs.lstatSync(root).isSymbolicLink()
-	&& /path\s*=\s*x-heep\s*$/m.test(readText(path.join(projectDir(), '.gitmodules')));
+	&& new RegExp(`path\\s*=\\s*${soc.id}\\s*$`, 'm').test(readText(path.join(projectDir(), '.gitmodules')));
 
 const short = (sha?: string) => sha?.slice(0, 7) ?? '?';
 
@@ -778,27 +795,28 @@ const short = (sha?: string) => sha?.slice(0, 7) ?? '?';
  */
 async function updateXheep() {
 	const head = await gitHead();
-	const pin = await pinnedCommit();
+	// The pinned commit is X-HEEP's.
+	const pin = soc.id === 'x-heep' ? await pinnedCommit() : undefined;
 	if (isHwProject()) {
 		vscode.window.showInformationMessage(`X-HEEP is vendored in ${path.relative(projectDir(), root)}: update it with make vendor-update.`);
 		return;
 	}
 	if (!managedXheep()) {
-		vscode.window.showInformationMessage(`X-HEEP here is your own clone (${root}): update it with git. It is at ${short(head)}`
+		vscode.window.showInformationMessage(`${soc.name} here is your own clone (${root}): update it with git. It is at ${short(head)}`
 			+ (pin ? `; the extension is tested with ${short(pin)}.` : '.'));
 		return;
 	}
 	const changed = changedFiles((await shOut('git status --porcelain --untracked-files=no', true)).out);
 	const own = changed.filter(f => !isGenerated(root, f));
 	if (own.length) {
-		vscode.window.showErrorMessage(`X-HEEP has local changes: ${own.slice(0, 5).join(', ')}${own.length > 5 ? ', …' : ''}. Commit or discard them in x-heep/ first.`);
+		vscode.window.showErrorMessage(`${soc.name} has local changes: ${own.slice(0, 5).join(', ')}${own.length > 5 ? ', …' : ''}. Commit or discard them in ${soc.id}/ first.`);
 		return;
 	}
 	const picked = await vscode.window.showQuickPick([
-		...(pin ? [{ label: `Latest tested commit (${short(pin)})`, description: pin === head ? 'current' : 'recommended', detail: 'The newest X-HEEP the extension is known to work with', ref: pin }] : []),
-		{ label: 'main', description: 'untested', detail: 'The newest X-HEEP: it may not work with this version of the extension yet', ref: 'main' },
-	], { placeHolder: `Update X-HEEP (now at ${short(head)})` });
-	if (!picked || !await runQuiet('Updating X-HEEP', makeTask('Update X-HEEP', updateCommand(picked.ref, changed), true), true)) {
+		...(pin ? [{ label: `Latest tested commit (${short(pin)})`, description: pin === head ? 'current' : 'recommended', detail: `The newest ${soc.name} the extension is known to work with`, ref: pin }] : []),
+		{ label: 'main', description: 'untested', detail: `The newest ${soc.name}: it may not work with this version of the extension yet`, ref: 'main' },
+	], { placeHolder: `Update ${soc.name} (now at ${short(head)})` });
+	if (!picked || !await runQuiet(`Updating ${soc.name}`, makeTask(`Update ${soc.name}`, updateCommand(picked.ref, changed), true), true)) {
 		return;
 	}
 	// The generated platform, the models and the CMake tree come from the previous X-HEEP.
@@ -809,62 +827,65 @@ async function updateXheep() {
 	apps.refresh();
 	refreshUi();
 	const bitstream = bitstreamFile();
-	vscode.window.showInformationMessage(`X-HEEP is now at ${short(await gitHead())}. The next build regenerates the platform and the simulation model.`
-		+ ' Commit x-heep in your project to keep this version.'
+	vscode.window.showInformationMessage(`${soc.name} is now at ${short(await gitHead())}. The next build regenerates the platform and the simulation model.`
+		+ ` Commit ${soc.id} in your project to keep this version.`
 		+ (bitstream?.startsWith(root + path.sep) ? ' Rebuild the FPGA bitstream too if your app needs the new hardware.' : ''));
 }
 
-/** Sets up a software project in a chosen folder: own apps in sw/applications, X-HEEP in x-heep/. */
-async function newProject() {
+/** Sets up a software project in a chosen folder: own apps in sw/applications, the platform in x-heep/ or x-alp/. */
+async function newProject(p: Soc = SOCS['x-heep']) {
 	const ws = vscode.workspace.workspaceFolders?.[0];
 	const dir = (await vscode.window.showOpenDialog({
 		canSelectFolders: true, canSelectFiles: false, defaultUri: ws?.uri,
-		title: 'Folder of the new software project (an empty one is fine)', openLabel: 'Create Project Here',
+		title: `Folder of the new ${p.name} software project (an empty one is fine)`, openLabel: 'Create Project Here',
 	}))?.[0]?.fsPath;
 	if (!dir) {
 		return;
 	}
-	if (isXheep(dir)) {
-		vscode.window.showErrorMessage('This is the X-HEEP repository itself: pick the folder of your own project.');
+	if (socOf(dir)) {
+		vscode.window.showErrorMessage(`This is the ${socOf(dir)!.name} repository itself: pick the folder of your own project.`);
 		return;
 	}
-	const xheep = path.join(dir, 'x-heep');
-	if (fs.existsSync(xheep) && !isXheep(xheep)) {
-		vscode.window.showErrorMessage(`${xheep} exists but is not an X-HEEP repository. Remove it and run this command again.`);
+	// The folder is named after the platform (SocId), where activate() looks for it.
+	const sub = path.join(dir, p.id);
+	if (fs.existsSync(sub) && socOf(sub) !== p) {
+		vscode.window.showErrorMessage(`${sub} exists but is not an ${p.name} repository. Remove it and run this command again.`);
 		return;
 	}
-	if (!fs.existsSync(xheep)) {
+	if (!fs.existsSync(sub)) {
+		// Only X-HEEP has a commit pinned as tested (XHEEP_COMMIT).
+		const tested = p.id === 'x-heep' ? 'the latest commit this extension is tested with' : 'its latest commit';
 		const how = await vscode.window.showQuickPick([
-			{ id: 'submodule', label: 'Add X-HEEP as a git submodule', detail: `Clones ${XHEEP_GIT} into x-heep/ at the latest commit this extension is tested with` },
-			{ id: 'link', label: 'Link an existing X-HEEP clone', detail: 'Symlinks x-heep/ to a clone you already have (kept out of git)' },
-		], { placeHolder: 'Where does X-HEEP come from?' });
+			{ id: 'submodule', label: `Add ${p.name} as a git submodule`, detail: `Clones ${p.git} into ${p.id}/ at ${tested}` },
+			{ id: 'link', label: `Link an existing ${p.name} clone`, detail: `Symlinks ${p.id}/ to a clone you already have (kept out of git)` },
+		], { placeHolder: `Where does ${p.name} come from?` });
 		if (!how) {
 			return;
 		}
 		if (how.id === 'link') {
-			const src = (await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, openLabel: 'Use this X-HEEP' }))?.[0]?.fsPath;
+			const src = (await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, openLabel: `Use this ${p.name}` }))?.[0]?.fsPath;
 			if (!src) {
 				return;
 			}
-			if (!fs.existsSync(path.join(src, 'util', 'xheep_gen', 'mcu_gen.py'))) {
-				vscode.window.showErrorMessage(`${src} is not an X-HEEP repository.`);
+			if (socOf(src) !== p) {
+				vscode.window.showErrorMessage(`${src} is not an ${p.name} repository.`);
 				return;
 			}
-			fs.symlinkSync(src, xheep);
-			addToGitignore(dir, 'x-heep');
+			fs.symlinkSync(src, sub);
+			addToGitignore(dir, p.id);
 		} else {
-			const commit = await pinnedCommit();
-			output.appendLine(commit ? `X-HEEP commit known to work with this extension: ${commit}` : 'No pinned X-HEEP commit found: using the latest main.');
-			const code = await runLogged('Cloning X-HEEP…', cloneCommand(XHEEP_GIT, commit), dir);
+			const commit = p.id === 'x-heep' ? await pinnedCommit() : undefined;
+			output.appendLine(commit ? `${p.name} commit known to work with this extension: ${commit}` : `No pinned ${p.name} commit: using the latest main.`);
+			const code = await runLogged(`Cloning ${p.name}…`, cloneCommand(p.git, commit, p.id), dir);
 			if (code !== 0) {
-				vscode.window.showErrorMessage('Cloning X-HEEP failed, see the X-HEEP output. Nothing was left behind: you can retry.');
+				vscode.window.showErrorMessage(`Cloning ${p.name} failed, see the X-HEEP output. Nothing was left behind: you can retry.`);
 				return;
 			}
 		}
 	}
 	const hello = path.join(dir, 'sw', 'applications', 'hello');
 	if (!fs.existsSync(hello)) {
-		writeMain(hello, 'hello');
+		writeMain(hello, 'hello', p.id);
 	}
 	// Recreated before each build (see projectSource), so it stays out of git.
 	addToGitignore(dir, 'sw/device');
@@ -940,6 +961,16 @@ async function jtagAdapter(ask: boolean): Promise<JtagAdapter | undefined> {
 
 /** Picks the run mode; `mode` (e.g. from a keybinding's args) skips the pick. */
 async function selectMode(mode?: Mode) {
+	if (soc.linkers) {
+		// X-ALP: simulation only, from the memory the app is linked into.
+		const linker = await vscode.window.showQuickPick(soc.linkers.map(l => ({ label: `Simulation · ${l.toUpperCase()}`, detail: `Linked into and run from the ${l.toUpperCase()}`, l })),
+			{ placeHolder: 'Where should the app run?' });
+		if (linker) {
+			await state.update('linker', linker.l);
+			refreshUi();
+		}
+		return;
+	}
 	const picked = mode && MODES[mode] ? { id: mode } : await vscode.window.showQuickPick(
 		(Object.keys(MODES) as Mode[]).map(id => ({ id, label: MODES[id].label, detail: MODES[id].detail })), { placeHolder: 'How should the app run?' });
 	if (picked) {
@@ -1010,7 +1041,7 @@ function reportBuildProblems(o: Options, ok: boolean): string | undefined {
 	const app = appDir(o.project);
 	const appReal = fs.realpathSync(app);
 	const isAppFile = (file: string) => { try { return fs.realpathSync(file).startsWith(appReal + path.sep); } catch { return false; } };
-	const ld = readText(path.join(root, 'sw', 'linker', linkerScript(o.mode)));
+	const ld = readText(path.join(root, 'sw', 'linker', linkerScript(o)));
 	const stack = stackSize(ld);
 	const problems = [
 		...(ok ? [] : explainBuild(readText(buildLog()), memoryRegions(ld), isAppFile)),
@@ -1162,7 +1193,7 @@ async function runSim(o: Options, onText: (text: string) => void, token: vscode.
 			job?.kill();
 		}
 	});
-	job = startJob(o.simulator === 'verilator' && dir ? verilatorRunCommand(dir) : withEnvSetup(simCommand(o)), hwRoot);
+	job = startJob(o.simulator === 'verilator' && dir ? verilatorRunCommand(dir, o.linker) : withEnvSetup(simCommand(o)), hwRoot);
 	const sim = job;
 	const cancel = token.onCancellationRequested(sim.kill);
 	const timer = timeoutMs ? setTimeout(() => { timedOut = true; sim.kill(); }, timeoutMs) : undefined;
@@ -1410,7 +1441,7 @@ const debugModelReady = () => fs.existsSync(path.join(debugSimDir(), 'Vtestharne
 
 // shortcut: saves during a debug model build are not tracked (savedDuringBuild), so such an edit waits for the next one.
 async function buildDebugModel(): Promise<boolean> {
-	const task = makeTask('Build debug model', debugModelBuildCommand(), false, {}, hwRoot);
+	const task = makeTask('Build debug model', debugModelBuildCommand(soc.id), false, {}, hwRoot);
 	const ok = await runQuiet('Building verilator debug model', task, true, false);
 	if (ok) {
 		await state.update('modelStamp.debug', state.get('platformStamp'));
@@ -1420,10 +1451,10 @@ async function buildDebugModel(): Promise<boolean> {
 	return ok;
 }
 
-/** Debug sessions to end when the program reaches `_exit`, by session name, with what to do with the exit code. */
+/** Debug sessions to end when the program reaches its exit (Soc.exitSymbol), by session name, with what to do with the exit code. */
 const exitWatchers = new Map<string, (code: number) => void>();
 
-/** Ends an X-HEEP debug session when it stops at `_exit` (EXIT_BREAKPOINT), as the simulator does on its own. */
+/** Ends a debug session when it stops at the exit (exitBreakpoint), as the simulator does on its own. */
 function exitTracker(session: vscode.DebugSession): vscode.DebugAdapterTracker | undefined {
 	const onExit = exitWatchers.get(session.name);
 	return onExit && {
@@ -1433,7 +1464,7 @@ function exitTracker(session: vscode.DebugSession): vscode.DebugAdapterTracker |
 			}
 			try {
 				const top = (await session.customRequest('stackTrace', { threadId: m.body?.threadId, startFrame: 0, levels: 1 })).stackFrames?.[0];
-				if (!top?.name?.startsWith('_exit')) {
+				if (!top?.name?.startsWith(soc.exitSymbol)) {
 					return;
 				}
 				const a0 = await session.customRequest('evaluate', { expression: '$a0', frameId: top.id, context: 'watch' });
@@ -1483,17 +1514,18 @@ async function debug(app?: string) {
 		}
 		const dir = debugSimDir();
 		stopUart = tailUart(path.join(dir, 'uart0.log'), `${o.project} · debug`);
-		const simJob = startJob(debugSimCommand(dir, path.join(root, 'sw', 'build', 'main.hex')), dir);
+		const firmware = path.join(root, 'sw', 'build', o.linker ? `main.${o.linker}.elf` : 'main.hex');
+		const simJob = startJob(debugSimCommand(dir, firmware, o.linker), dir);
 		jobs.push(simJob);
 		// The bitbang server accepts a single client, so wait for its banner instead of probing the port.
 		if (!await waitUntil(() => simJob.log().includes('Listening on port 4567'), 30_000, simJob.done)) {
 			return false;
 		}
-		const ocdLog = path.join(dir, 'openocd.log'); // tb/core-v-mini-mcu.cfg logs there, not to stderr
+		const ocdLog = path.join(dir, 'openocd.log'); // X-HEEP's tb/core-v-mini-mcu.cfg logs there, X-ALP's to stderr
 		fs.rmSync(ocdLog, { force: true });
 		const ocd = startJob(openocdCommand(openocd, path.join(root, 'tb', 'core-v-mini-mcu.cfg')), dir, { JTAG_VPI_PORT: '4567' });
 		jobs.push(ocd);
-		return waitUntil(() => fs.existsSync(ocdLog) && fs.readFileSync(ocdLog, 'utf8').includes('Listening on port 3333'), 60_000, ocd.done);
+		return waitUntil(() => `${readText(ocdLog)}${ocd.log()}`.includes('Listening on port 3333'), 60_000, ocd.done);
 	});
 	if (!ready) {
 		cleanup();
@@ -1530,8 +1562,8 @@ async function debug(app?: string) {
 		MIMode: 'gdb',
 		miDebuggerPath: gdb,
 		miDebuggerArgs: '-q', // no GDB banner in the Debug Console
-		// cppdbg fails on GDB's "riscv:rv32" ('arch' out of range); any 32-bit value skips that detection.
-		targetArchitecture: 'arm',
+		// cppdbg fails on GDB's "riscv:rv32" ('arch' out of range); any value of the same width skips that detection.
+		targetArchitecture: soc.linkers ? 'arm64' : 'arm',
 		// Exactly sw/gdbInit: cppdbg's own remote launch uses plain `target remote` and its own steps.
 		// Breakpoints set in the editor are inserted after these commands, before the final continue.
 		setupCommands: [{ text: 'set remotetimeout 2000' }],
@@ -1541,7 +1573,7 @@ async function debug(app?: string) {
 			{ text: 'target extended-remote :3333' },
 			{ text: 'load' },
 			// Not in the Breakpoints view: exitTracker ends the session there.
-			{ text: EXIT_BREAKPOINT },
+			{ text: exitBreakpoint(soc.exitSymbol) },
 		],
 		launchCompleteCommand: 'exec-continue',
 	});
@@ -1738,7 +1770,7 @@ class MemoryMapProvider implements vscode.TreeDataProvider<MapNode> {
 	refresh() { this.nodes = undefined; this.emitter.fire(); }
 	getChildren(node?: MapNode) {
 		return node ? node.children : this.nodes ??= platformScript('map', configPath()).then(r => r.error
-			? [{ label: 'The platform cannot be read', description: '', tooltip: r.error, children: [] }] : mapNodes(r.map));
+			? [{ label: 'The platform cannot be read', description: '', tooltip: r.error, children: [] }] : mapNodes(r.map, soc.id));
 	}
 	getTreeItem(node: MapNode) {
 		const item = new vscode.TreeItem(node.label, node.children.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
@@ -1884,9 +1916,9 @@ async function pythonCheck(): Promise<Pick<Check, 'state' | 'text' | 'hint'>> {
 				: name && !envs.includes(name) ? `there is no conda environment "${name}"` : `it fails: ${env.out.trim().split('\n').pop()}`,
 		};
 	}
-	const missing = (await shOut(missingModulesCommand())).out.trim().split('\n').pop()?.trim();
-	return missing ? { state: 'fail', text, hint: `it lacks X-HEEP's Python packages (${missing.split(' ').join(', ')})` }
-		: { state: 'ok', text: `${text} (X-HEEP's packages present)` };
+	const missing = (await shOut(missingModulesCommand(soc.pythonModules))).out.trim().split('\n').pop()?.trim();
+	return missing ? { state: 'fail', text, hint: `it lacks ${soc.name}'s Python packages (${missing.split(' ').join(', ')})` }
+		: { state: 'ok', text: `${text} (${soc.name}'s packages present)` };
 }
 
 /** Vivado is on PATH and starts: enables "Build Bitstream", which is the only thing that needs it. */
@@ -1986,7 +2018,7 @@ async function checkEnv(quiet = false) {
 		addFix('Open Setup Guide', () => vscode.env.openExternal(vscode.Uri.parse(SETUP_GUIDE)));
 	}
 
-	if (managedXheep()) {
+	if (managedXheep() && soc.id === 'x-heep') { // the pinned commit is X-HEEP's
 		const [head, pin] = await Promise.all([gitHead(), pinnedCommit()]);
 		if (pin && head !== pin && !state.get('xheepOnMain')) {
 			report('warn', `X-HEEP is at ${short(head)}, not at the commit tested with the extension (${short(pin)})`, 'run Update X-HEEP');
@@ -1998,7 +2030,6 @@ async function checkEnv(quiet = false) {
 	note(`Platform config: ${configPath()} (${platformReady() ? 'generated' : 'regenerated on the next build'})`);
 
 	if (envOk) {
-		const fpga = currentMode() !== 'sim';
 		// Vivado is optional (building bitstreams), but a broken install would fail every FPGA load through it.
 		const vivadoOnPath = await sh('command -v vivado');
 		hasVivado = vivadoOnPath && await sh('vivado -version');
@@ -2009,6 +2040,9 @@ async function checkEnv(quiet = false) {
 			note(`Vivado (optional, Build Bitstream): ${hasVivado ? 'found' : 'not found'}`);
 		}
 		note(`Verible extension (optional, SystemVerilog lint, formatting, go to definition): ${vscode.extensions.getExtension(VERIBLE) ? 'installed' : `not installed (${VERIBLE})`}`);
+	}
+	if (envOk && soc.id === 'x-heep') { // the FPGA flow is X-HEEP's only, for now
+		const fpga = currentMode() !== 'sim';
 		// Loading bitstreams only matters in the FPGA modes: elsewhere a missing tool is a note, not a problem.
 		const tool = await programmer();
 		if (tool || fpga) {
@@ -2268,7 +2302,8 @@ function refreshUi() {
 	appItem.text = `${status ? icon : '$(chip)'} ${currentApp()}`;
 	appItem.tooltip = `X-HEEP application${status && status !== 'running' ? ` (last build: ${status === 'ok' ? 'succeeded' : 'failed'})` : ''}`;
 	appItem.backgroundColor = status === 'fail' ? new vscode.ThemeColor('statusBarItem.errorBackground') : undefined;
-	modeItem.text = `$(target) ${MODES[currentMode()].label}${currentMode() === 'fpga-jtag' && lastAdapter ? ` (${lastAdapter.label})` : ''}`;
+	modeItem.text = soc.linkers ? `$(target) Simulation · ${currentLinker()!.toUpperCase()}`
+		: `$(target) ${MODES[currentMode()].label}${currentMode() === 'fpga-jtag' && lastAdapter ? ` (${lastAdapter.label})` : ''}`;
 	configItem.text = `$(settings) ${path.basename(configPath()).replace(/\.(py|hjson)$/, '')}`;
 }
 
@@ -2289,9 +2324,12 @@ function setupIntelliSense() {
 	}
 }
 
-const isXheep = (dir: string) => fs.existsSync(path.join(dir, 'util', 'xheep_gen', 'mcu_gen.py'));
-/** Where X-HEEP is in a workspace folder: the folder itself, a software project's x-heep/, a hardware project's hw/vendor/x-heep. */
-const xheepIn = (dir: string) => [dir, path.join(dir, 'x-heep'), path.join(dir, 'hw', 'vendor', 'x-heep')].find(isXheep);
+const isXheep = (dir: string) => socOf(dir)?.id === 'x-heep';
+/**
+ * Where the platform is in a workspace folder: the folder itself, a software project's x-heep/ or x-alp/, a hardware
+ * project's hw/vendor/x-heep.
+ */
+const platformIn = (dir: string) => [dir, ...Object.keys(SOCS).map(d => path.join(dir, d)), path.join(dir, 'hw', 'vendor', 'x-heep')].find(d => socOf(d));
 
 export function activate(context: vscode.ExtensionContext) {
 	extensionDir = context.extensionPath;
@@ -2301,11 +2339,12 @@ export function activate(context: vscode.ExtensionContext) {
 	buildProblems = vscode.languages.createDiagnosticCollection('xheep');
 	hdlProblemsCollection = vscode.languages.createDiagnosticCollection('xheep-rtl');
 	context.subscriptions.push(output, uart, buildProblems, hdlProblemsCollection,
-		vscode.commands.registerCommand('xheep.newProject', newProject),
+		vscode.commands.registerCommand('xheep.newProject', () => newProject(SOCS['x-heep'])),
+		vscode.commands.registerCommand('xheep.newXalpProject', () => newProject(SOCS['x-alp'])),
 		vscode.commands.registerCommand('xheep.newHwProject', newHwProject),
 		vscode.commands.registerCommand('xheep.openInContainer', openInContainer));
-	// X-HEEP itself is open, a software project with X-HEEP in x-heep/, or a hardware project (gr-heep) vendoring it.
-	const found = vscode.workspace.workspaceFolders?.find(f => xheepIn(f.uri.fsPath));
+	// X-HEEP or X-ALP itself is open, a software project with it in x-heep/ or x-alp/, or a hardware project (gr-heep).
+	const found = vscode.workspace.workspaceFolders?.find(f => platformIn(f.uri.fsPath));
 	if (!found) {
 		// Empty view, so its welcome content (package.json viewsWelcome) offers to create a project.
 		context.subscriptions.push(vscode.window.registerTreeDataProvider('xheep.apps', { getChildren: () => [], getTreeItem: (x: string) => new vscode.TreeItem(x) }));
@@ -2319,10 +2358,13 @@ export function activate(context: vscode.ExtensionContext) {
 		return;
 	}
 	const dir = folder.uri.fsPath;
-	root = xheepIn(dir)!;
+	root = platformIn(dir)!;
+	soc = socOf(root)!;
 	hwRoot = root.endsWith(path.join('hw', 'vendor', 'x-heep')) ? dir : root;
 	swRoot = path.join(dir, 'sw');
 	vscode.commands.executeCommand('setContext', 'xheep.active', true);
+	// FPGA and flash are X-HEEP's only, for now.
+	vscode.commands.executeCommand('setContext', 'xheep.isXheep', soc.id === 'x-heep');
 	state = context.workspaceState;
 	globalState = context.globalState;
 	// A build cut short by closing the window would otherwise spin forever.

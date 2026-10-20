@@ -2,7 +2,7 @@
 // The extension feeds it what X-HEEP's generator reads and does the writing; the page only edits a form.
 
 import * as vscode from 'vscode';
-import { Catalog, Platform, PlatformForm } from './platform';
+import { Catalog, Platform, PlatformForm, XalpCatalog, XalpForm, XalpPlatform } from './platform';
 
 /** What the page shows. */
 export interface EditorState {
@@ -28,11 +28,19 @@ export interface EditorState {
 	board: string;
 }
 
+/** What the X-ALP page shows: its own knobs (cache and DRAM, peripherals). */
+export interface XalpEditorState extends Pick<EditorState, 'mode' | 'name' | 'file' | 'base'> {
+	xalp: true;
+	form: XalpForm;
+	platform: XalpPlatform;
+	catalog: XalpCatalog;
+}
+
 export interface EditorHost {
 	/** Reads the active configuration; undefined with an error message when it cannot. */
-	load(): Promise<EditorState | { error: string }>;
+	load(): Promise<EditorState | XalpEditorState | { error: string }>;
 	/** Writes the form: resolves with xheep_gen's complaint when it rejects it, or cancelled (e.g. no name given). */
-	apply(form: PlatformForm): Promise<{ error?: string; cancelled?: boolean }>;
+	apply(form: PlatformForm | XalpForm): Promise<{ error?: string; cancelled?: boolean }>;
 	/** Creating: picks another configuration to start from. */
 	startFrom(): Promise<void>;
 	openFile(): void;
@@ -40,14 +48,15 @@ export interface EditorHost {
 
 let panel: vscode.WebviewPanel | undefined;
 
-export function openPlatformEditor(host: EditorHost) {
+/** `xalp`: X-ALP's page, with its own knobs. */
+export function openPlatformEditor(host: EditorHost, xalp = false) {
 	if (panel) {
 		panel.reveal();
 		return;
 	}
-	panel = vscode.window.createWebviewPanel('xheep.platform', 'X-HEEP Platform', vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
+	panel = vscode.window.createWebviewPanel('xheep.platform', xalp ? 'X-ALP Platform' : 'X-HEEP Platform', vscode.ViewColumn.Active, { enableScripts: true, retainContextWhenHidden: true });
 	const nonce = Math.random().toString(36).slice(2);
-	panel.webview.html = html(nonce, panel.webview.cspSource);
+	panel.webview.html = (xalp ? xalpHtml : html)(nonce, panel.webview.cspSource);
 	const post = (m: unknown) => panel?.webview.postMessage(m);
 	const load = async () => {
 		post({ type: 'busy', text: 'Reading the configuration…' });
@@ -77,11 +86,7 @@ export function refreshPlatformEditor() {
 	panel?.webview.postMessage({ type: 'reload' });
 }
 
-function html(nonce: string, csp: string): string {
-	return /* html */ `<!doctype html>
-<html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${csp} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<style>
+const STYLE = /* css */ `
 :root {
 	--fg: var(--vscode-foreground); --muted: var(--vscode-descriptionForeground); --line: var(--vscode-panel-border, var(--vscode-widget-border, #8884));
 	--bg: var(--vscode-editor-background); --accent: var(--vscode-button-background); --accent-fg: var(--vscode-button-foreground);
@@ -146,7 +151,13 @@ footer .cost { color: var(--muted); flex: 1 1 260px; min-width: 0; }
 .btn.primary { background: var(--accent); color: var(--accent-fg); }
 .btn:disabled { opacity: .5; cursor: default; }
 #status { padding: 24px 0; color: var(--muted); }
-</style></head>
+`;
+
+function html(nonce: string, csp: string): string {
+	return /* html */ `<!doctype html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${csp} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<style>${STYLE}</style></head>
 <body><div class="wrap">
 <div id="status">Reading the configuration…</div>
 <div id="editor" hidden>
@@ -313,6 +324,111 @@ $('banks-up').onclick = () => { f.banks = Math.min(32, f.banks + 1); render(); }
 $('il-size').onchange = e => { f.ilSizeKb = Number(e.target.value); render(); };
 $('bank-size').onchange = e => { f.bankKb = Number(e.target.value); render(); };
 for (const [id, k] of [['code', 'codeKb'], ['stack', 'stackKb'], ['heap', 'heapKb']]) $(id).onchange = e => { f[k] = Math.max(0, Number(e.target.value) || 0); render(); };
+$('revert').onclick = () => { f = structuredClone(st.form); error = undefined; render(); };
+$('apply').onclick = () => { error = undefined; vscode.postMessage({ type: 'apply', form: f }); };
+$('start').onclick = () => vscode.postMessage({ type: 'start' });
+$('open').onclick = () => vscode.postMessage({ type: 'open' });
+vscode.postMessage({ type: 'ready' });
+</script></body></html>`;
+}
+
+/** X-ALP's page: the last-level cache (its geometry sizes the SPM), the DRAM it caches, and the peripherals. */
+function xalpHtml(nonce: string, csp: string): string {
+	return /* html */ `<!doctype html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${csp} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+<style>${STYLE}</style></head>
+<body><div class="wrap">
+<div id="status">Reading the configuration…</div>
+<div id="editor" hidden>
+	<header>
+		<h1 id="name"></h1>
+		<div class="sub"><span id="where"></span><button class="link" id="start">Start from another configuration</button><button class="link" id="open">Open as code</button><span class="tag">Experimental</span></div>
+	</header>
+	<section>
+		<h2>Core</h2>
+		<div class="row"><div class="lab">CPU</div><div><code id="cpu"></code><div class="hint">X-ALP's only CPU: RV64GC, apps are built for it.</div></div></div>
+	</section>
+	<section>
+		<h2>Memory</h2>
+		<div class="mem" id="mem"></div>
+		<div class="row">
+			<label class="lab" for="ways">Cache ways</label>
+			<div><select id="ways"></select></div>
+			<label class="lab" for="lines">Lines per way</label>
+			<div><select id="lines"></select></div>
+			<label class="lab" for="blocks">Blocks per line</label>
+			<div><select id="blocks"></select><div class="hint" id="geo-hint"></div></div>
+			<label class="lab" for="dram">DRAM</label>
+			<div><select id="dram"></select><div class="hint">Behind the cache. Apps linked into the DRAM (Simulation · DRAM) run from it.</div></div>
+		</div>
+	</section>
+	<section>
+		<h2>Peripherals</h2>
+		<div class="periph" id="periph"></div>
+		<div class="hint">Always included: SoC control, boot ROM, the cache's configuration registers.</div>
+	</section>
+	<div id="notes" style="display:grid; gap:6px; padding-bottom:12px"></div>
+	<footer><span class="cost" id="cost"></span><button class="btn" id="revert">Revert</button><button class="btn primary" id="apply">Apply</button></footer>
+</div>
+</div>
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+const $ = id => document.getElementById(id);
+const CHOICES = { ways: [1, 2, 4, 8, 16, 32], lines: [64, 128, 256, 512, 1024, 2048], blocks: [2, 4, 8, 16], dramMb: [64, 128, 256, 512, 1024] };
+let st, f, error;
+
+window.addEventListener('message', ({ data: m }) => {
+	if (m.type === 'busy') { $('cost').textContent = m.text; $('apply').disabled = true; if (!st) { $('status').textContent = m.text; } }
+	if (m.type === 'error') { if (m.keep && st) { error = m.text; render(); } else { $('status').hidden = false; $('editor').hidden = true; $('status').textContent = m.text; } }
+	if (m.type === 'load') { st = m.state; f = structuredClone(st.form); error = undefined; $('status').hidden = true; $('editor').hidden = false; render(); }
+	if (m.type === 'reload') { vscode.postMessage({ type: 'ready' }); }
+	if (m.type === 'idle' && st) { render(); }
+});
+
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const size = kb => kb >= 1024 ? kb / 1024 + ' MB' : kb + ' KB';
+// The configuration's own value stays pickable even when it is not among the usual ones.
+const fill = (id, k, label) => { $(id).innerHTML = [...new Set([...CHOICES[k], st.form[k], f[k]])].sort((a, b) => a - b).map(v => '<option value="' + v + '">' + label(v) + '</option>').join(''); $(id).value = String(f[k]); };
+
+function render() {
+	const creating = st.mode === 'create';
+	$('name').textContent = creating ? 'New platform configuration' : st.name;
+	$('where').innerHTML = creating ? 'Starting from <code></code>' : 'On top of <code></code>';
+	$('where').querySelector('code').textContent = creating ? st.file : st.base;
+	$('start').hidden = !creating;
+	$('open').hidden = creating;
+	$('apply').textContent = creating ? 'Save as…' : 'Apply';
+	$('cpu').textContent = st.platform.cpu;
+	fill('ways', 'ways', String); fill('lines', 'lines', String); fill('blocks', 'blocks', String);
+	fill('dram', 'dramMb', v => size(v * 1024));
+	const bytes = st.platform.llc.dataWidth / 8, spm = f.ways * f.lines * f.blocks * bytes / 1024;
+	$('geo-hint').textContent = f.ways + ' × ' + f.lines + ' × ' + f.blocks + ' blocks of ' + bytes + ' bytes = ' + size(spm) + '. Every way is usable as scratchpad: this is the SPM size.';
+	$('mem').innerHTML = '<div class="mrow"><b>SPM</b><div class="track"><span class="v">' + size(spm) + '</span></div><div class="cap">On-chip, the cache used as scratchpad (Simulation · SPM).</div></div>'
+		+ '<div class="mrow"><b>DRAM</b><div class="track"><span class="v">' + size(f.dramMb * 1024) + '</span></div><div class="cap">Off-chip, through the cache.</div></div>';
+
+	const names = st.catalog.peripherals;
+	$('periph').innerHTML = names.map(p => '<label><input type="checkbox" data-p="' + p.name + '"' + (f.peripherals.includes(p.name) ? ' checked' : '') + '><span>' + p.name + '<small></small></span></label>').join('');
+	$('periph').querySelectorAll('input').forEach((el, i) => {
+		el.parentElement.querySelector('small').textContent = names[i].doc;
+		el.onchange = () => { f.peripherals = el.checked ? [...f.peripherals, el.dataset.p].sort() : f.peripherals.filter(x => x !== el.dataset.p); render(); };
+	});
+
+	const notes = [];
+	if (!f.peripherals.includes('uart')) notes.push(['', 'No UART:', 'printf output goes nowhere.']);
+	if (error) notes.push(['err', 'The generator rejects this configuration:', error]);
+	$('notes').innerHTML = notes.map(([c]) => '<div class="note ' + c + '"><b></b> <span></span></div>').join('');
+	$('notes').querySelectorAll('.note').forEach((n, i) => { n.querySelector('b').textContent = notes[i][1]; n.querySelector('span').textContent = notes[i][2]; });
+
+	const changed = Object.keys(f).filter(k => !same(f[k], st.form[k]));
+	$('cost').textContent = !changed.length ? 'No changes.' : changed.length + ' change' + (changed.length > 1 ? 's' : '') + '. '
+		+ 'The next build regenerates the platform and the simulation model (a few minutes).'
+		+ (creating ? ' Save as… creates the configuration and makes it the active one.' : '');
+	$('apply').disabled = !changed.length;
+	$('revert').disabled = !changed.length;
+}
+
+for (const [id, k] of [['ways', 'ways'], ['lines', 'lines'], ['blocks', 'blocks'], ['dram', 'dramMb']]) $(id).onchange = e => { f[k] = Number(e.target.value); render(); };
 $('revert').onclick = () => { f = structuredClone(st.form); error = undefined; render(); };
 $('apply').onclick = () => { error = undefined; vscode.postMessage({ type: 'apply', form: f }); };
 $('start').onclick = () => vscode.postMessage({ type: 'start' });

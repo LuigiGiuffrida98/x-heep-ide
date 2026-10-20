@@ -1,5 +1,13 @@
 # Change Log
 
+## Unreleased
+
+- **X-ALP**: open an X-ALP clone, or start a software project with **New X-ALP Software Project**. Build and Run
+  in simulation, from the SPM or the DRAM (status bar), the Memory Map view, and the platform editor with X-ALP's
+  knobs (cache geometry and SPM size, DRAM, peripherals). Debug is wired up, waiting for X-ALP's JTAG debugging to
+  work in simulation. FPGA and flash stay X-HEEP's only.
+- No longer takes an X-ALP repo for X-HEEP (it vendors X-HEEP's generator, but builds and runs differently).
+
 ## 0.5.0
 
 - **New Hardware Project**: a new repo from gr-heep, to extend X-HEEP with your own hardware, renamed after

@@ -5,6 +5,7 @@
 // configuration (Python or HJSON) through xheep_gen and changes only what differs in the form.
 
 import { createHash } from 'crypto';
+import { SocId } from './soc';
 
 /** What media/platform.py reads from a configuration, as mcu-gen would build it. */
 export interface Platform {
@@ -44,15 +45,18 @@ export interface Register {
 /** A row of the Memory Map view: `define` is what Copy Address copies, the C expression of `address`. */
 export interface MapNode { label: string; description: string; tooltip?: string; address?: number; define?: string; children: MapNode[] }
 
-/** Regions whose core_v_mini_mcu.h define is not named after them. */
-const DEFINE_OF: Record<string, string> = { ext_slaves: 'EXT_SLAVE', base_peripheral_domain: 'AO_PERIPHERAL', user_peripheral_domain: 'PERIPHERAL' };
-const startDefine = (name: string) => `${DEFINE_OF[name] ?? name.toUpperCase()}_START_ADDRESS`;
+/** Regions whose define (core_v_mini_mcu.h, X-ALP's core_v_mcu.h) is not named after them. */
+const DEFINE_OF: Record<SocId, Record<string, string>> = {
+	'x-heep': { ext_slaves: 'EXT_SLAVE', base_peripheral_domain: 'AO_PERIPHERAL', user_peripheral_domain: 'PERIPHERAL' },
+	'x-alp': { spm: 'LLC' },
+};
 
 export const hexAddress = (n: number) => `0x${n.toString(16).padStart(8, '0')}`;
 const size = (bytes: number) => bytes >= 1 << 20 ? `${bytes / (1 << 20)} MB` : bytes >= 1024 ? `${bytes / 1024} KB` : `${bytes} B`;
 
 /** The Memory Map view's tree: RAM, then the address regions in address order, peripherals with registers and fields. */
-export function mapNodes(map: AddressMap): MapNode[] {
+export function mapNodes(map: AddressMap, soc: SocId = 'x-heep'): MapNode[] {
+	const startDefine = (name: string) => `${DEFINE_OF[soc][name] ?? name.toUpperCase()}_START_ADDRESS`;
 	const range = (r: AddressRange, children: MapNode[] = []): MapNode =>
 		({ label: r.name, description: `${hexAddress(r.start)} · ${size(r.length)}`, address: r.start, define: startDefine(r.name), children });
 	const register = (base: number, p: string, ip: string, r: Register): MapNode => ({
@@ -224,6 +228,11 @@ export function overlayConfig(name: string, baseRel: string, base: PlatformForm,
 		}
 		body.push('    system.add_peripheral_domain(PeripheralDomain("user_peripheral_domain", user.get_power_domain(), user.has_clock_gating(), peripherals))');
 	}
+	return overlayFile(name, baseRel, form, imports, body);
+}
+
+/** An overlay: loads the base at `baseRel`, then runs `body` on it (as `system`). */
+function overlayFile(name: string, baseRel: string, form: unknown, imports: Set<string>, body: string[]): string {
 	return [
 		`# Platform "${name}", from the X-HEEP IDE platform editor, on top of ${baseRel}.`,
 		'# Apply in the editor rewrites this file. To take it over by hand, delete the xheep-ide line.',
@@ -239,4 +248,56 @@ export function overlayConfig(name: string, baseRel: string, base: PlatformForm,
 		'    return system',
 		'',
 	].join('\n');
+}
+
+// --- X-ALP --------------------------------------------------------------------
+// Its knobs: the last-level cache, whose geometry sizes the SPM and which caches the DRAM, and the peripherals.
+
+/** What media/platform.py reads from an X-ALP configuration. */
+export interface XalpPlatform {
+	cpu: string;
+	llc: { ways: number; lines: number; blocks: number; dataWidth: number; dramSize: number };
+	peripherals: string[];
+}
+
+/** Peripherals a configuration may leave out, with the module defining each. */
+export interface XalpCatalog { peripherals: { name: string; cls: string; pkg: string; doc: string }[] }
+
+/** The X-ALP editor's form. Geometry values are powers of two, as xheep_gen requires. */
+export interface XalpForm { ways: number; lines: number; blocks: number; dramMb: number; peripherals: string[] }
+
+export const xalpForm = (p: XalpPlatform, catalog: XalpCatalog): XalpForm => ({
+	ways: p.llc.ways, lines: p.llc.lines, blocks: p.llc.blocks, dramMb: p.llc.dramSize / (1 << 20),
+	peripherals: p.peripherals.filter(n => catalog.peripherals.some(c => c.name === n)).sort(),
+});
+
+/** The overlay for `form` on top of the X-ALP configuration at `baseRel`, which reads as `base`. */
+export function xalpOverlayConfig(name: string, baseRel: string, base: XalpForm, form: XalpForm, catalog: XalpCatalog): string {
+	const changed = new Set(Object.keys(form).filter(k => JSON.stringify(base[k as keyof XalpForm]) !== JSON.stringify(form[k as keyof XalpForm])));
+	const imports = new Set(['from pathlib import PurePath', 'from load_config import load_cfg_file']);
+	const body: string[] = [];
+	const cache = ['ways', 'lines', 'blocks', 'dramMb'].some(k => changed.has(k));
+	if (cache) {
+		imports.add('from peripherals.base_peripherals.llc import LLC');
+		body.push('    old = system.get_cache()',
+			`    llc = LLC(old.get_address(), old.get_length(), set_assoc=${form.ways}, num_lines=${form.lines}, num_blocks=${form.blocks},`,
+			`              data_width=old._data_width, spm_start=old._spm_start, cached_start=old._cached_start, cached_size=${hex(form.dramMb << 20)})`,
+			'    system.set_memory_ss(llc)');
+	}
+	if (cache || changed.has('peripherals')) {
+		// Domains hand out copies of their peripherals, which remove_peripheral() does not match: each is rebuilt.
+		const removed = base.peripherals.filter(p => !form.peripherals.includes(p));
+		const added = catalog.peripherals.filter(c => form.peripherals.includes(c.name) && !base.peripherals.includes(c.name));
+		imports.add('from peripherals.peripheral_domain import PeripheralDomain');
+		added.forEach(c => imports.add(`from ${c.pkg} import ${c.cls}`));
+		body.push('    for d in system.get_domains():',
+			`        peripherals = [${cache ? 'llc if p.get_name() == "axi_llc" else p' : 'p'} for p in d.get_peripherals()${removed.length ? ` if p.get_name() not in (${removed.map(r => JSON.stringify(r)).join(', ')},)` : ''}]`);
+		if (added.length) {
+			body.push('        if d.contains_peripheral("soc_ctrl"):',
+				`            peripherals += [${added.map(c => `${c.cls}()`).join(', ')}]  # placed by the generator`);
+		}
+		body.push('        system.remove_domain(d.get_name())',
+			'        system.add_domain(PeripheralDomain(d.get_name(), d.get_power_domain(), d.has_clock_gating(), peripherals))');
+	}
+	return overlayFile(name, baseRel, form, imports, body);
 }

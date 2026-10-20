@@ -12,7 +12,7 @@
     "url": "https://github.com/LuigiGiuffrida98/x-heep-ide/issues"
   },
   "preview": true,
-  "version": "0.6.0",
+  "version": "0.6.1",
   "engines": {
     "vscode": "^1.92.0"
   },

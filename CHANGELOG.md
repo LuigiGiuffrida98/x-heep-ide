@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.7.0
+
+- Tested with X-HEEP [528381f](https://github.com/x-heep/x-heep/commit/528381f5014d972511079820f1e0c36a222cfeb1).
+
 ## Unreleased
 
 - **X-ALP**: open an X-ALP clone, or start a software project with **New X-ALP Software Project**. Build and Run

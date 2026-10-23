@@ -67,7 +67,7 @@ for (const linker of soc.linkers ?? [undefined]) {
 	// X-ALP has no build/ before its first model build.
 	const models = fs.existsSync(path.join(xheep, 'build')) ? fs.readdirSync(path.join(xheep, 'build')) : [];
 	if (!models.some(d => isCoreBuildDir(d) && fs.existsSync(path.join(xheep, 'build', d, 'sim-verilator', 'Vtestharness')))) {
-		run(simModelBuildCommand('verilator', linker && config), xheep);
+		run(simModelBuildCommand('verilator', linker && soc.generated), xheep);
 	}
 	const core = fs.readdirSync(path.join(xheep, 'build')).find(isCoreBuildDir);
 	assert.ok(core, 'no fusesoc build directory');

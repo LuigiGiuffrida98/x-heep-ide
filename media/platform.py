@@ -4,6 +4,7 @@
 #   python platform.py read  <x-heep root> <config>   -> JSON: effective values and what can be chosen
 #   python platform.py check <x-heep root> <config>   -> JSON: whether mcu-gen would accept it
 #   python platform.py map   <x-heep root> <config>   -> JSON: memory map, peripherals and their registers
+#   python platform.py generated <x-heep root> -           -> JSON: the same, from the platform as generated (by hand too)
 #
 # Runs in X-HEEP's Python environment. Prints one JSON object on its last line.
 
@@ -11,6 +12,7 @@ import contextlib
 import inspect
 import io
 import json
+import re
 import sys
 from pathlib import PurePath
 
@@ -89,7 +91,6 @@ IP_OF = {"gpio_ao": "gpio", "rv_timer_ao": "rv_timer", "spi_flash": "spi_host", 
 
 def register_files(root):
     """The regtool descriptions in X-HEEP, by IP name. mcu-gen writes the templated ones (soc_ctrl, dma, ...)."""
-    import re
     from pathlib import Path
 
     files = {}
@@ -190,8 +191,75 @@ def address_map(xheep, root):
     }
 
 
+# The C header mcu-gen writes with every address: X-HEEP's, X-ALP's.
+HEADERS = ("sw/device/lib/runtime/core_v_mini_mcu.h", "sw/device/lib/runtime/core_v_mcu.h")
+# Memories among its blocks: X-HEEP's RAM banks, X-ALP's scratchpad (the cache) and DRAM.
+MEMORIES = re.compile(r"^(RAM\d+|LLC|DRAM)$")
+
+
+def generated_map(root):
+    """address_map() of the platform as generated, from its header: whatever configuration made it, by hand too."""
+    from pathlib import Path
+
+    header = next((Path(root, h) for h in HEADERS if Path(root, h).exists()), None)
+    if not header:
+        raise RuntimeError("the platform is not generated yet (no core_v_mini_mcu.h or core_v_mcu.h)")
+    defines = dict(re.findall(r"^#define[ \t]+(\w+)[ \t]+(.+?)[ \t]*$", header.read_text(), re.M))
+
+    def value(name, depth=0):
+        if name not in defines or depth > 10:
+            return None
+        expr = re.sub(r"\b[A-Za-z_]\w*", lambda m: str(value(m.group(0), depth + 1)), defines[name])
+        # Only numbers and + - ( ) remain: the header's address expressions.
+        return eval(expr) if re.fullmatch(r"[\s()+\-0-9a-fA-FxX]+", expr) else None
+
+    blocks = []
+    for name in defines:
+        base = name[: -len("_START_ADDRESS")] if name.endswith("_START_ADDRESS") else None
+        if not base:
+            continue
+        start = value(name)
+        end = value(base + "_END_ADDRESS") if base + "_END_ADDRESS" in defines else None
+        length = value(base + "_SIZE") if base + "_SIZE" in defines else (end - start if end is not None and start is not None else None)
+        if start is not None and length:  # absent peripherals are defined as 0, without a size
+            blocks.append({"name": base.lower(), "start": start, "length": length})
+
+    inside = lambda b, d: b is not d and d["start"] <= b["start"] and b["start"] + b["length"] <= d["start"] + d["length"] and b["length"] < d["length"]
+    banks = [b for b in blocks if MEMORIES.match(b["name"].upper())]
+    domains = [d for d in blocks if d not in banks and any(inside(b, d) for b in blocks)]
+    peripherals = [b for b in blocks if any(inside(b, d) for d in domains)]
+    regions = [b for b in blocks if b not in banks and b not in domains and b not in peripherals]
+    for vendor in ("hw/vendor", "hw/vendor/x-heep"):
+        sys.path.insert(0, f"{root}/{vendor}/pulp_platform/register_interface/vendor/lowrisc_opentitan/util")
+    files = register_files(root)
+
+    def regs(name):
+        f = files.get(IP_OF.get(name, name))
+        try:
+            return registers(f) if f else []
+        except Exception:  # a description reggen cannot read: the peripheral is still on the map
+            return []
+
+    return {
+        "banks": banks,
+        "regions": regions,
+        "domains": [
+            {**d, "peripherals": [{**p, "registers": regs(p["name"]), "ip": IP_OF.get(p["name"], p["name"])} for p in peripherals if inside(p, d)]}
+            for d in domains
+        ],
+    }
+
+
 def main():
     cmd, root, config = sys.argv[1:4]
+    if cmd == "generated":  # no configuration: the one that made it may be unknown
+        sys.path.insert(0, f"{root}/util/xheep_gen")
+        try:
+            out = {"ok": True, "map": generated_map(root)}
+        except Exception as e:
+            out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        print(json.dumps(out))
+        return
     sys.path.insert(0, f"{root}/util/xheep_gen")
     out = {"ok": True}
     log = io.StringIO()

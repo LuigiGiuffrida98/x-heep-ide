@@ -234,6 +234,13 @@
           "title": "X-HEEP",
           "icon": "media/xheep.svg"
         }
+      ],
+      "panel": [
+        {
+          "id": "xheep-panel",
+          "title": "X-HEEP",
+          "icon": "media/xheep.svg"
+        }
       ]
     },
     "views": {
@@ -247,6 +254,14 @@
           "name": "Memory Map",
           "when": "xheep.active",
           "visibility": "collapsed"
+        }
+      ],
+      "xheep-panel": [
+        {
+          "type": "webview",
+          "id": "xheep.console",
+          "name": "X-HEEP",
+          "when": "xheep.active"
         }
       ]
     },
@@ -488,7 +503,7 @@
         "xheep.mcuConfig": {
           "type": "string",
           "default": "configs/general.py",
-          "markdownDescription": "Platform configuration (`.py` or `.hjson`), relative to the project folder or, if not found there, to X-HEEP. The platform is regenerated automatically when it changes."
+          "markdownDescription": "Platform configuration (`.py` or `.hjson`), relative to the project folder or, if not found there, to X-HEEP. Build and Run regenerate the platform when it is newer than what was generated, here or by hand."
         },
         "xheep.simulator": {
           "type": "string",
@@ -498,11 +513,6 @@
           ],
           "default": "verilator",
           "description": "RTL simulator used by the Simulation mode."
-        },
-        "xheep.rebuildModelOnSave": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Rebuild the simulation model in the background when an RTL file of X-HEEP (`hw/`, `tb/`) is saved, once a model was built. Its errors go to the Problems panel."
         },
         "xheep.formatRtlOnSave": {
           "type": "boolean",

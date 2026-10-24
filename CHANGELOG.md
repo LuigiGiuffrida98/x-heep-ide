@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.8.0
+
+- Tested with X-HEEP [b3eb3c8](https://github.com/x-heep/x-heep/commit/b3eb3c8d626d3debe8e5cf99ecff32a5a31549fd).
+
 ## Unreleased
 
 - No more background rebuild of the simulation model on save (`xheep.rebuildModelOnSave` is gone). Build runs mcu-gen

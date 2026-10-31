@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.9.0
+
+- Tested with X-HEEP [4e46d16](https://github.com/x-heep/x-heep/commit/4e46d167b55a7ea73857587268dc7f7bdb3f32aa).
+
 ## 0.8.0
 
 - Tested with X-HEEP [b3eb3c8](https://github.com/x-heep/x-heep/commit/b3eb3c8d626d3debe8e5cf99ecff32a5a31549fd).

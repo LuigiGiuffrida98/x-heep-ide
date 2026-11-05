@@ -1,6 +1,6 @@
 # Change Log
 
-## Unreleased
+## 0.10.0
 
 - **Setup script** (`xheep.setupScript`), for servers where a script puts the tools on PATH: when tools are missing,
   **Fix…** first asks for it, then offers to install or locate the rest. The script is sourced when the window opens,

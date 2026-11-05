@@ -868,8 +868,28 @@ async function updateXheep() {
 		+ (bitstream?.startsWith(root + path.sep) ? ' Rebuild the FPGA bitstream too if your app needs the new hardware.' : ''));
 }
 
+/** On Windows the X-HEEP tools need Linux: offers to connect this window to WSL, to create the project there. False on Windows. */
+async function inLinux(): Promise<boolean> {
+	if (process.platform !== 'win32') {
+		return true;
+	}
+	const pick = await vscode.window.showWarningMessage('X-HEEP builds with Linux tools: on Windows, create the project in WSL.', {
+		modal: true, detail: 'This window connects to WSL. There, install X-HEEP IDE in WSL if VS Code asks, run this command again and pick '
+			+ 'a folder in the Linux home (~): under /mnt/c builds are slow.',
+	}, 'Connect to WSL', 'How to Install WSL');
+	if (pick === 'Connect to WSL') {
+		await ensureExtension('ms-vscode-remote.remote-wsl', 'Opening WSL') && vscode.commands.executeCommand('remote-wsl.connect');
+	} else if (pick) {
+		vscode.env.openExternal(vscode.Uri.parse('https://learn.microsoft.com/windows/wsl/install'));
+	}
+	return false;
+}
+
 /** Sets up a software project in a chosen folder: own apps in sw/applications, the platform in x-heep/ or x-alp/. */
 async function newProject(p: Soc = SOCS['x-heep']) {
+	if (!await inLinux()) {
+		return;
+	}
 	const ws = vscode.workspace.workspaceFolders?.[0];
 	const dir = (await vscode.window.showOpenDialog({
 		canSelectFolders: true, canSelectFiles: false, defaultUri: ws?.uri,
@@ -939,7 +959,10 @@ async function newProject(p: Soc = SOCS['x-heep']) {
  * the folder (files, SystemVerilog modules, fusesoc core), commits it and opens it.
  */
 async function newHwProject() {
-	const parent = (await vscode.window.showOpenDialog({
+	if (!await inLinux()) {
+		return;
+	}
+	const parent =(await vscode.window.showOpenDialog({
 		canSelectFolders: true, canSelectFiles: false, defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
 		title: 'Folder to create the hardware project in', openLabel: 'Create Project Here',
 	}))?.[0]?.fsPath;

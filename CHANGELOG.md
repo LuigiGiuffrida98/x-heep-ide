@@ -5,6 +5,8 @@
 - **Setup script** (`xheep.setupScript`), for servers where a script puts the tools on PATH: when tools are missing,
   **Fix…** first asks for it, then offers to install or locate the rest. The script is sourced when the window opens,
   and every command the extension runs, the environment check included, gets the environment it leaves.
+- On Windows, **New … Project** offers to connect the window to WSL and create the project there, instead of failing
+  on the `\` in Windows paths.
 - Set Up Tools offers, for each missing tool, to install it by hand from its section of X-HEEP's setup guide, then
   to check again.
 

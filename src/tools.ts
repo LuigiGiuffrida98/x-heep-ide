@@ -55,7 +55,18 @@ export function findConda(bases = CONDA_BASES): string | undefined {
 	return bases.map(b => path.join(b, 'bin', 'conda')).find(isExecutable);
 }
 
-export const condaSetup = (conda: string, env: string) => `eval "$('${conda}' shell.bash hook)" && conda activate ${env}`;
+/** Sources the setup script given as $1, then dumps the environment it leaves, NUL-separated (its own output to stderr). */
+export const SETUP_SCRIPT_COMMAND = 'source "$1" >&2 </dev/null; env -0';
+
+/** The variables the setup script set or changed, from SETUP_SCRIPT_COMMAND's output; bash's own are left out. */
+export function scriptEnvOf(dump: string, base: NodeJS.ProcessEnv = process.env): Record<string, string> {
+	const own = new Set(['PWD', 'OLDPWD', 'SHLVL', '_']);
+	return Object.fromEntries(dump.split('\0').filter(l => l.includes('='))
+		.map(l => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)])
+		.filter(([k, v]) => !own.has(k) && base[k] !== v));
+}
+
+export const condaSetup =(conda: string, env: string) => `eval "$('${conda}' shell.bash hook)" && conda activate ${env}`;
 export const venvSetup = (venv: string) => `source '${path.join(venv, 'bin', 'activate')}'`;
 
 /** Python environments with fusesoc, as `xheep.envSetup` snippets: conda envs, then X-HEEP's own .venv. */

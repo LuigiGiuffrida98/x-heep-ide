@@ -318,6 +318,16 @@ suite('Tool discovery', () => {
 		assert.deepStrictEqual(envs.map(e => e.setup), [tools.condaSetup(path.join(tmp, 'mf', 'bin', 'conda'), 'x-heep')]);
 	});
 
+	test('takes what a setup script sets, not its output or bash\'s own variables', () => {
+		const script = path.join(tmp, 'setup.sh');
+		fs.writeFileSync(script, `echo hello\nexport PATH="/eda/bin:$PATH" RISCV_XHEEP='/opt/a b'\ncd /\nfalse\n`);
+		const dump = spawnSync('/bin/bash', ['-c', tools.SETUP_SCRIPT_COMMAND, 'x', script], { encoding: 'utf8' }).stdout;
+		const env = tools.scriptEnvOf(dump);
+		assert.strictEqual(env.RISCV_XHEEP, '/opt/a b');
+		assert.ok(env.PATH.startsWith('/eda/bin:'));
+		assert.ok(!('PWD' in env) && !('HOME' in env));
+	});
+
 	test('picks the Embecosm toolchain for the platform', () => {
 		assert.ok(tools.toolchainUrl('darwin', 'arm64')!.endsWith('corev-gcc-macos-arm64/8/artifact/corev-openhw-gcc-macos-20240530.dmg'));
 		assert.ok(tools.toolchainUrl('linux', 'x64', 'ID=ubuntu\nVERSION_ID="20.04"\n')!.includes('ubuntu2004-20240530.tar.gz'));

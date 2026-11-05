@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as net from 'net';
 import { execFile, spawn } from 'child_process';
 import {
-	findExecutables, findToolchains, findPythonEnvs, findConda, condaSetup, venvSetup,
+	findExecutables, findToolchains, findPythonEnvs, findConda, condaSetup, venvSetup, SETUP_SCRIPT_COMMAND, scriptEnvOf,
 	xheepVerilatorVersion, verilatorPrefix, verilatorInstallCommand, veriblePrefix, veribleInstallCommand,
 	toolchainUrl, toolchainInstallCommand, packageInstallCommand, devcontainerJson, xheepImageTag,
 } from './tools';
@@ -94,7 +94,27 @@ function loadExamples(): Promise<void> {
 const expandHome = (p: string) => p.replace(/^~(?=$|\/)/, os.homedir());
 
 function toolchain(): string {
-	return expandHome(cfg().get<string>('riscvToolchain') || process.env[soc?.toolchainVar ?? 'RISCV_XHEEP'] || process.env.RISCV_XHEEP || '~/.riscv');
+	const env = { ...process.env, ...scriptEnv };
+	return expandHome(cfg().get<string>('riscvToolchain') || env[soc?.toolchainVar ?? 'RISCV_XHEEP'] || env.RISCV_XHEEP || '~/.riscv');
+}
+
+/** What `xheep.setupScript` sets (PATH, RISCV_XHEEP, licenses...): every command the extension runs gets it. */
+let scriptEnv: Record<string, string> = {};
+/** Why the setup script gave no environment, for the environment check. */
+let scriptProblem: string | undefined;
+
+// shortcut: commands started before this ends (first second after the window opens) run without the script's environment; await it in runTask/shOut if that bites.
+async function loadSetupScript() {
+	const script = expandHome(cfg().get<string>('setupScript', '').trim());
+	if (!script || !fs.existsSync(script)) {
+		[scriptEnv, scriptProblem] = [{}, script ? 'does not exist' : undefined];
+		return;
+	}
+	const { dump, err } = await new Promise<{ dump: string; err: string }>(resolve => execFile('/bin/bash', ['-c', SETUP_SCRIPT_COMMAND, 'xheep-setup', script],
+		{ cwd: root, timeout: 120_000, maxBuffer: 64 << 20 }, (_e, stdout, stderr) => resolve({ dump: stdout, err: stderr })));
+	// A script that calls exit takes the shell with it: nothing after it runs.
+	[scriptEnv, scriptProblem] = dump ? [scriptEnvOf(dump), undefined] : [{}, `gave no environment (does it call exit?) ${err.trim().split('\n').pop() ?? ''}`.trim()];
+	output.appendLine(`Setup script ${script}: ${scriptProblem ?? `sets ${Object.keys(scriptEnv).join(', ') || 'nothing'}`}`);
 }
 
 /** A tool's executable: its `xheep.<key>` setting (the executable or its folder), else `name` from PATH. */
@@ -672,8 +692,9 @@ function withEnvSetup(cmd: string): string {
 function taskEnv(): Record<string, string> {
 	// CMake reads this env var, so every app build drops sw/build/compile_commands.json for IntelliSense.
 	return {
+		...scriptEnv,
 		RISCV_XHEEP: toolchain(), RISCV_XALP: toolchain(), CMAKE_EXPORT_COMPILE_COMMANDS: 'ON',
-		PATH: [...toolDirs(), process.env.PATH ?? ''].join(path.delimiter),
+		PATH: [...toolDirs(), scriptEnv.PATH ?? process.env.PATH ?? ''].join(path.delimiter),
 	};
 }
 
@@ -2082,6 +2103,10 @@ async function checkEnv(quiet = false) {
 	const note = (text: string) => lines.push(`  ${text}`);
 	const addFix: AddFix = (label, run) => { if (!fixes.some(f => f.label === label)) { fixes.push({ label, run }); } };
 
+	const script = cfg().get<string>('setupScript', '').trim();
+	if (script) {
+		report(scriptProblem ? 'fail' : 'ok', `Setup script: ${script}`, scriptProblem && `it ${scriptProblem}`);
+	}
 	const tools = await toolChecks();
 	for (const c of tools) {
 		if (c.state === 'ok') {
@@ -2170,16 +2195,35 @@ async function fixTools(all = false) {
 			return;
 		}
 		const icon = { ok: '$(pass)', warn: '$(warning)', fail: '$(error)' };
-		const picked = await vscode.window.showQuickPick(pending.map(c => ({
+		// On a server the tools are often already there, behind a script that sets them up: one pick for all of them.
+		const script: vscode.QuickPickItem & { c?: Check } = {
+			label: '$(file-code) I have a setup script…', description: cfg().get<string>('setupScript') || undefined,
+			detail: 'One that puts the tools on PATH (e.g. on a server): every command the extension runs gets its environment',
+		};
+		const picked = await vscode.window.showQuickPick([script, { label: 'Install or locate a tool', kind: vscode.QuickPickItemKind.Separator }, ...pending.map(c => ({
 			label: `${icon[c.state]} ${c.label}`, description: c.state === 'ok' ? c.text : c.hint, detail: `Needed for ${c.usedBy}`, c,
-		})), { placeHolder: all ? 'X-HEEP: which tool do you want to change?' : 'X-HEEP: which tool do you want to set up?' });
-		if (!picked || !await fixTool(picked.c) || all) {
+		}))], { placeHolder: all ? 'X-HEEP: which tool do you want to change?' : 'X-HEEP: use a setup script, or pick a tool to set up' });
+		if (!picked || !await (picked.c ? fixTool(picked.c) : pickSetupScript()) || all) {
 			return;
 		}
 	}
 }
 
 const setGlobal = (key: string, value: string) => cfg().update(key, value, vscode.ConfigurationTarget.Global);
+
+/** Asks for `xheep.setupScript` and sources it; false if dismissed. */
+async function pickSetupScript(): Promise<boolean> {
+	const file = (await vscode.window.showOpenDialog({ canSelectFiles: true, openLabel: 'Use this setup script' }))?.[0]?.fsPath;
+	if (!file) {
+		return false;
+	}
+	await setGlobal('setupScript', file);
+	await loadSetupScript();
+	if (scriptProblem) {
+		vscode.window.showErrorMessage(`X-HEEP: the setup script ${scriptProblem}.`, 'Show Log').then(pick => pick && output.show());
+	}
+	return true;
+}
 
 /** Offers the found candidates, a manual pick, an install and the container for one tool; false if dismissed. */
 async function fixTool(c: Check): Promise<boolean> {
@@ -2194,7 +2238,7 @@ async function fixTool(c: Check): Promise<boolean> {
 	if (c.id === 'python') {
 		found = findPythonEnvs(root).map(e => ({ label: e.label, detail: e.setup, run: () => setGlobal('envSetup', e.setup) }));
 		locate = {
-			label: '$(terminal) Use a setup script or command…', detail: 'e.g. a lab script or "module load", run before every command',
+			label: '$(terminal) Use a shell command…', detail: 'e.g. "module load" or a conda activation, run before every build',
 			run: async () => {
 				const v = await vscode.window.showInputBox({ prompt: 'Shell command that activates the X-HEEP Python environment', value: cfg().get('envSetup') });
 				return v !== undefined && setGlobal('envSetup', v);
@@ -2529,6 +2573,8 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.window.onDidChangeActiveTextEditor(onEditor),
 		// A configuration set by hand in the settings is picked too.
 		vscode.workspace.onDidChangeConfiguration(async e => { if (e.affectsConfiguration('xheep.mcuConfig')) { await configPicked(); refreshUi(); refreshPlatformEditor(); memoryMap.refresh(); } }),
+		// Set by hand too; Set Up Tools loads it itself, so this may source it twice.
+		vscode.workspace.onDidChangeConfiguration(e => e.affectsConfiguration('xheep.setupScript') && loadSetupScript()),
 		vscode.workspace.onDidSaveTextDocument(onSave),
 		vscode.workspace.onWillSaveTextDocument(formatOnSave),
 		vscode.workspace.onDidOpenTextDocument(onOpen),
@@ -2565,7 +2611,7 @@ export function activate(context: vscode.ExtensionContext) {
 	jtagAdapter(false).then(refreshUi); // for the status bar
 	setupIntelliSense();
 	setupVerible(vscode.workspace.textDocuments.some(d => isRtl(d.uri.fsPath)));
-	checkEnv(true);
+	loadSetupScript().then(() => checkEnv(true));
 }
 
 export function deactivate() {

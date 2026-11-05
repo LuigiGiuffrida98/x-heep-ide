@@ -14,6 +14,9 @@
   Opening a file of an app makes it the active one, which Run builds and runs.
 - **X-HEEP tab** in the bottom panel: the app's UART next to the log of everything the extension runs (mcu-gen, model
   and app builds, simulator, OpenOCD). Tasks still run in the terminal, and **Show Log** opens the tab.
+- **Setup script** (`xheep.setupScript`), for servers where a script puts the tools on PATH: when tools are missing,
+  **Fix…** first asks for it, then offers to install or locate the rest. The script is sourced when the window opens,
+  and every command the extension runs, the environment check included, gets the environment it leaves.
 
 ## 0.7.0
 

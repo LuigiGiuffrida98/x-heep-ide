@@ -22,8 +22,8 @@ FPGA. Open an X-HEEP clone in VS Code and the extension activates.
   exceptions, and programs stuck on the board.
 - **Environment check**: Python environment, toolchain, Verilator and verible versions, FPGA hardware and
   permissions. Each problem comes with what to do about it.
-- **Set Up Tools**: finds or installs the missing tools, or reopens the project in the X-HEEP container (Docker
-  or WSL), where everything is preinstalled.
+- **Set Up Tools**: uses a setup script that puts the tools on PATH (as on many servers), finds or installs the
+  missing tools, or reopens the project in the X-HEEP container (Docker or WSL), where everything is preinstalled.
 
 ## Platform configurations
 
@@ -89,8 +89,8 @@ against X-ALP.
 
 ## Settings
 
-All under `xheep.*`. The defaults work for most setups. `envSetup`, `riscvToolchain`, `fpgaBoard`, `bitstream`
-and `serialPort` are the ones you may need to set.
+All under `xheep.*`. The defaults work for most setups. `setupScript`, `envSetup`, `riscvToolchain`, `fpgaBoard`,
+`bitstream` and `serialPort` are the ones you may need to set.
 
 ## Development
 

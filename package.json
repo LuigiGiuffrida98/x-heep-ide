@@ -485,6 +485,12 @@
           "markdownDescription": "Bash snippet run before every `make` call to activate the X-HEEP Python environment. Leave empty to use the repo `.venv`.",
           "scope": "machine"
         },
+        "xheep.setupScript": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Script that sets up the tools (`PATH`, `RISCV_XHEEP`, licenses, ...), e.g. on a server. Sourced when the window opens and when this changes: every command the extension runs gets the environment it leaves. Set by **X-HEEP: Set Up Tools**.",
+          "scope": "machine"
+        },
         "xheep.riscvToolchain": {
           "type": "string",
           "default": "",

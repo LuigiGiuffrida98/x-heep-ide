@@ -16,7 +16,7 @@ import { Mode, MODES, JTAG_ADAPTERS, Adapter, boardAdapters, pickAdapter, Option
 	Programmer, BOARDS, BitstreamInfo, fileSha1, builtBitstream, bitstreamBuildCommand, vivadoTcl, vivadoCommand, openocdFpgaCommand,
 	exitBreakpoint, gdbRunCommand, exitCode, regValue, pickSerialPort, serialReadCommand,
 	linkerScript, memoryRegions, stackSize, explainBuild, stackProblems, uartException, exceptionCause, printable,
-	SETUP_GUIDE, missingModulesCommand, condaEnvName, requiredVersions, verilatorVersion, veribleVersion,
+	SETUP_GUIDE, setupGuideFor, missingModulesCommand, condaEnvName, requiredVersions, verilatorVersion, veribleVersion,
 	usbDevices, udevRule, EPFL_PROGRAMMER_USB, platformScriptCommand, largestFrame,
 	hdlProblems, veribleFileList, formattedDirs, appTestConfig, BuildProblem } from './xheep';
 import { Platform, Catalog, PlatformForm, XalpPlatform, XalpCatalog, XalpForm, xalpForm, xalpOverlayConfig, formFromPlatform, plainMemory, hardwareFingerprint, archFor, overlayConfig, overlayHeader,
@@ -2299,6 +2299,13 @@ async function fixTool(c: Check): Promise<boolean> {
 		}
 	}
 
+	const guide: Action = {
+		label: '$(book) Install it by hand, following X-HEEP\'s setup guide…', detail: setupGuideFor(c.id),
+		run: async () => {
+			await vscode.env.openExternal(vscode.Uri.parse(setupGuideFor(c.id)));
+			vscode.window.showInformationMessage(`X-HEEP: once ${c.label} is installed, check again.`, 'Check Environment').then(pick => pick && checkEnv());
+		},
+	};
 	const items: Action[] = [
 		...(found.length ? [sep('Found on this computer'), ...found] : []),
 		sep('Other options'),
@@ -2312,6 +2319,7 @@ async function fixTool(c: Check): Promise<boolean> {
 				}
 			},
 		}] : []),
+		guide,
 		{ label: '$(vm) Use the X-HEEP container instead…', detail: 'All tools preinstalled, via Docker or WSL; simulation only, no FPGA', run: openInContainer },
 	];
 	const action = await vscode.window.showQuickPick(items, { placeHolder: `${c.label}: how do you want to set it up?` });
@@ -2319,7 +2327,8 @@ async function fixTool(c: Check): Promise<boolean> {
 		return false;
 	}
 	await action.run();
-	return true;
+	// Installing by hand takes a while: no tool list popping up again meanwhile.
+	return action !== guide;
 }
 
 // --- Containers -------------------------------------------------------------

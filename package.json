@@ -41,6 +41,7 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
+    "version": "node -e \"const fs = require('fs'), v = require('./package.json').version, t = fs.readFileSync('CHANGELOG.md', 'utf8'); fs.writeFileSync('CHANGELOG.md', t.replace('\\n## Unreleased\\n', '\\n## ' + v + '\\n'))\" && git add CHANGELOG.md",
     "test": "vscode-test"
   },
   "devDependencies": {

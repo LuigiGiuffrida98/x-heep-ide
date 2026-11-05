@@ -79,11 +79,12 @@ jobs:
       - run: |
           echo "$SHA" > XHEEP_COMMIT
           version=$(npx --yes semver -i minor "$(node -p "require('./package.json').version")")
-          # New changelog entry right under the title.
-          VERSION=$version node -e "const fs = require('fs'), e = process.env;
-            const lines = fs.readFileSync('CHANGELOG.md', 'utf8').split('\\n');
-            lines.splice(1, 0, '', '## ' + e.VERSION, '', '- Tested with X-HEEP [' + e.SHA.slice(0, 7) + '](https://github.com/x-heep/x-heep/commit/' + e.SHA + ').');
-            fs.writeFileSync('CHANGELOG.md', lines.join('\\n'));"
+          # The tested commit on top of the Unreleased notes (made under the title if none): npm version below
+          # renames them to the new version (package.json "version" script).
+          node -e "const fs = require('fs'), sha = process.env.SHA, t = fs.readFileSync('CHANGELOG.md', 'utf8');
+            const tested = '- Tested with X-HEEP [' + sha.slice(0, 7) + '](https://github.com/x-heep/x-heep/commit/' + sha + ').\\n';
+            fs.writeFileSync('CHANGELOG.md', t.includes('\\n## Unreleased\\n\\n') ? t.replace('\\n## Unreleased\\n\\n', '\\n## Unreleased\\n\\n' + tested)
+              : t.replace('\\n', '\\n\\n## Unreleased\\n\\n' + tested));"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -am "Pin X-HEEP ${SHA:0:7}"

@@ -247,6 +247,12 @@ export const linkerScript = (o: Pick<Options, 'mode' | 'linker'>) => o.linker ? 
 
 export const SETUP_GUIDE = 'https://x-heep.readthedocs.io/en/latest/GettingStarted/Setup.html';
 
+/** The section of the setup guide on a tool; the whole guide for the tools it does not cover. */
+export function setupGuideFor(tool: string): string {
+	const section: Record<string, string> = { python: 'python', toolchain: 'install-the-risc-v-compiler', verilator: 'install-verilator', verible: 'install-verible' };
+	return section[tool] ? `${SETUP_GUIDE}#${section[tool]}` : SETUP_GUIDE;
+}
+
 /** Python modules `make mcu-gen` and fusesoc need from X-HEEP's environment (util/python-requirements.txt). */
 export const PYTHON_MODULES = ['hjson', 'mako', 'fusesoc', 'edalize', 'pkg_resources'];
 

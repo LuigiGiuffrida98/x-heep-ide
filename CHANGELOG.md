@@ -1,5 +1,13 @@
 # Change Log
 
+## Unreleased
+
+- **Setup script** (`xheep.setupScript`), for servers where a script puts the tools on PATH: when tools are missing,
+  **Fix…** first asks for it, then offers to install or locate the rest. The script is sourced when the window opens,
+  and every command the extension runs, the environment check included, gets the environment it leaves.
+- Set Up Tools offers, for each missing tool, to install it by hand from its section of X-HEEP's setup guide, then
+  to check again.
+
 ## 0.9.0
 
 - Tested with X-HEEP [4e46d16](https://github.com/x-heep/x-heep/commit/4e46d167b55a7ea73857587268dc7f7bdb3f32aa).
@@ -8,7 +16,7 @@
 
 - Tested with X-HEEP [b3eb3c8](https://github.com/x-heep/x-heep/commit/b3eb3c8d626d3debe8e5cf99ecff32a5a31549fd).
 
-## Unreleased
+## 0.7.1
 
 - No more background rebuild of the simulation model on save (`xheep.rebuildModelOnSave` is gone). Build runs mcu-gen
   only when the platform is missing or older than its configuration; Run also builds the model only when it is missing
@@ -22,9 +30,6 @@
   Opening a file of an app makes it the active one, which Run builds and runs.
 - **X-HEEP tab** in the bottom panel: the app's UART next to the log of everything the extension runs (mcu-gen, model
   and app builds, simulator, OpenOCD). Tasks still run in the terminal, and **Show Log** opens the tab.
-- **Setup script** (`xheep.setupScript`), for servers where a script puts the tools on PATH: when tools are missing,
-  **Fix…** first asks for it, then offers to install or locate the rest. The script is sourced when the window opens,
-  and every command the extension runs, the environment check included, gets the environment it leaves.
 
 ## 0.7.0
 

@@ -1,4 +1,5 @@
-# Release helpers. `make patch|minor|major` bumps package.json, commits, tags v<version> and pushes:
+# Release helpers. `make patch|minor|major` bumps package.json, renames the CHANGELOG's "Unreleased" to the new
+# version, commits, tags v<version> and pushes:
 # the tag makes CI test, publish to the Marketplace and create the GitHub release.
 .PHONY: patch minor major package e2e
 

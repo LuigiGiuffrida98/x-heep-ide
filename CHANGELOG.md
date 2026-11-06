@@ -1,5 +1,9 @@
 # Change Log
 
+## Unreleased
+
+- Tested with X-HEEP [a793d92](https://github.com/x-heep/x-heep/commit/a793d92fea497a7656d5385a63f277b3548b47b4).
+
 ## 0.10.0
 
 - **Setup script** (`xheep.setupScript`), for servers where a script puts the tools on PATH: when tools are missing,

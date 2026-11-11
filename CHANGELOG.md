@@ -1,6 +1,6 @@
 # Change Log
 
-## Unreleased
+## 0.12.0
 
 - Tested with X-HEEP [2e12b16](https://github.com/x-heep/x-heep/commit/2e12b1610a45c3a68b4044b739e88273de3c8376).
 

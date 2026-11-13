@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.image.outputs.tag }}
+      xalp: ${{ steps.xalp.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - id: ref
@@ -33,6 +34,13 @@ jobs:
         run: |
           v=$(curl -fsSL "https://raw.githubusercontent.com/x-heep/x-heep/${{ steps.ref.outputs.ref }}/core-v-mini-mcu.core" | sed -n 's/^name: .*core-v-mini-mcu:\(.*\)/\1/p')
           echo "tag=v${v:?no version in core-v-mini-mcu.core}" >> "$GITHUB_OUTPUT"
+      - id: xalp
+        # As X-ALP's own CI: the image of the X-HEEP release its vendored X-HEEP is based on (`latest` lags behind).
+        run: |
+          rev=$(curl -fsSL https://raw.githubusercontent.com/x-heep/x-alp/main/hw/vendor/x-heep.lock.hjson | sed -n 's/^ *rev: *//p')
+          git clone -q --bare --filter=tree:0 https://github.com/x-heep/x-heep.git "$RUNNER_TEMP/x-heep"
+          tag=$(git -C "$RUNNER_TEMP/x-heep" describe --tags --abbrev=0 --match 'v*' "${rev:?no rev in x-heep.lock.hjson}")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   # The extension's steps for a software project, run against the pinned X-HEEP
   # in the image X-HEEP's own CI uses: clone, mcu-gen, build, Verilator model, simulation.
@@ -54,12 +62,13 @@ jobs:
         shell: bash -le {0} # login shell: the image activates conda and its tools in /etc/profile.d
         run: 'XHEEP_COMMIT=$(cat XHEEP_COMMIT) "$NODE" out/test/e2e.js "$RUNNER_TEMP/project"'
 
-  # The same steps against X-ALP's latest main, in the image X-ALP's own CI uses (`latest`: X-ALP has no release
-  # tags yet). Not required to publish: X-ALP's main moves on its own.
+  # The same steps against X-ALP's latest main, in the image X-ALP's own CI uses.
+  # Not required to publish: X-ALP's main moves on its own.
   e2e-xalp:
+    needs: image
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/x-heep/x-heep/x-heep-toolchain:latest
+      image: ghcr.io/x-heep/x-heep/x-heep-toolchain:${{ needs.image.outputs.xalp }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

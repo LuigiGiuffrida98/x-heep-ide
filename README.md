@@ -1,35 +1,159 @@
 # X-HEEP IDE (Alpha)
 
 VS Code extension for developing software on [X-HEEP](https://github.com/esl-epfl/x-heep), in simulation and on
-FPGA. Open an X-HEEP clone in VS Code and the extension activates.
+FPGA: create a project, write an app, then build, run and debug it, without leaving the editor.
 
-## Features
+![An app run in simulation: the Applications view, the app's UART output and the log](images/run.png)
 
-- **Applications view** (X-HEEP icon in the activity bar): your apps and the X-HEEP examples, with Build, Run and
-  Debug.
-- **Run modes** (status bar):
-  - **Simulation**: runs the app on the Verilator (or Questasim) model. Debug uses GDB on a JTAG-enabled model.
-  - **FPGA · JTAG**: loads the app into X-HEEP's RAM through the JTAG adapter that is plugged in. Run runs it,
-    Debug opens GDB.
-  - **FPGA · Flash**: writes the app to the SPI flash, and X-HEEP boots it by itself, as the chip would.
-- **Run button** (status bar): builds and runs the active app, the one whose file is open. In Simulation it tells
-  the model: green when ready, a red cross when its build failed, a wrench when Run will build it first. The app name
-  next to it tells the app's build. Both count what you build by hand (`make verilator-build`, `make app`).
-- **X-HEEP tab** in the bottom panel (next to Problems, Output, Terminal): the app's UART output on the left, closed
-  by the program's exit code, and the log on the right: commands, mcu-gen, model and app builds, simulator, OpenOCD.
-  Both are also in the *X-HEEP UART* and *X-HEEP* Output channels.
-- **Errors explained**: memory overflows, functions that need an OS (`sleep`, `pthread_*`), stack overflows,
-  exceptions, and programs stuck on the board.
-- **Environment check**: Python environment, toolchain, Verilator and verible versions, FPGA hardware and
-  permissions. Each problem comes with what to do about it.
-- **Set Up Tools**: uses a setup script that puts the tools on PATH (as on many servers), finds or installs the
-  missing tools, or reopens the project in the X-HEEP container (Docker or WSL), where everything is preinstalled.
+## Getting started
 
-## Platform configurations
+Ten steps, from an empty folder to an app running on the FPGA. Steps 1 to 6 take you to your first app running in
+simulation.
 
-Click the configuration in the status bar to pick a configuration, or to create one as Python code or with the
-experimental editor. The editor is a form for CPU, bus, memory and peripherals. It saves a small Python file on
-top of the configuration you started from, and never edits the original.
+### 1. Before you start
+
+- **Linux or macOS.** On Windows, use [WSL](https://learn.microsoft.com/windows/wsl/install): when you create a
+  project, the extension offers to connect the window to WSL.
+- **The X-HEEP tools**: the Python environment, a RISC-V toolchain and Verilator, as in
+  [X-HEEP's setup guide](https://x-heep.readthedocs.io/en/latest/GettingStarted/Setup.html). Missing some? Go on
+  anyway: step 3 helps you install them, or reopens the project in the X-HEEP container, where all of them are
+  preinstalled.
+
+### 2. Create a project
+
+Open an empty folder in VS Code and click the X-HEEP icon in the activity bar.
+
+![The X-HEEP view in an empty folder](images/welcome.png)
+
+- **New X-HEEP Software Project**: your apps stay in this folder, in your own repo, with X-HEEP in `x-heep/`.
+- **New X-ALP Software Project**: the same for [X-ALP](#x-alp).
+- **New Hardware Project**: a new repo from gr-heep, to add your own hardware to X-HEEP (see
+  [Hardware projects](#hardware-projects)).
+- **Open X-HEEP Folder**: open an X-HEEP clone. The extension works there too.
+
+A software project asks where X-HEEP comes from: a git submodule at the X-HEEP commit tested with the extension,
+or a link to a clone you already have.
+
+![Where X-HEEP comes from: a git submodule or a clone you already have](images/new-project.png)
+
+The project opens with a first app, `hello`, in `sw/applications/hello`.
+
+### 3. Check the tools
+
+When the project opens, the extension checks the Python environment, the toolchain, Verilator and verible. When
+something is missing, a notification says so. **Show Details** lists each problem with what to do about it, and
+**Open Setup Guide** opens X-HEEP's.
+
+![A problem in the environment](images/env-problem.png)
+
+**Fix…** walks you through the tools that need it:
+
+![Fix…: a setup script, or the tools to set up](images/env-fix.png)
+
+- **Setup script**: on a server where a script puts the tools on `PATH`, point the extension to it.
+- **Install or locate** each missing tool, or follow its section of X-HEEP's setup guide and check again.
+- **Use the X-HEEP container instead** (Docker, or WSL on Windows): all the tools are preinstalled there, for
+  simulation (no FPGA).
+
+Run **X-HEEP: Check Environment** from the Command Palette at any time. When all is fine, it says so and offers
+**Change a Tool…** to use, say, another toolchain.
+
+### 4. Write your app
+
+The **Applications** view lists your apps, and the X-HEEP examples under **Examples**. Click **+** to create an
+app: it goes in `sw/applications/<name>/main.c`.
+
+![New Application: the + button in the Applications view](images/new-app.png)
+
+Open a file of an app and it becomes the **active** app: Build, Run and Debug act on it. Hover an app for its own
+buttons: New File, Build, Run and Debug.
+
+### 5. Choose where the app runs
+
+The status bar shows, from left to right: the active app, the run mode, the Run button and the platform
+configuration. Click any of them to change it.
+
+![The status bar: active app, run mode, Run button, platform configuration](images/statusbar.png)
+
+The **run mode** says where Run and Debug send the app:
+
+- **Simulation**: on the RTL model of X-HEEP, with Verilator (or Questasim). No hardware needed: start here.
+- **FPGA · JTAG**: loads the app into X-HEEP's RAM through the JTAG adapter. Run runs it, Debug opens GDB.
+- **FPGA · Flash**: writes the app to the SPI flash, and X-HEEP boots it by itself, as the chip would.
+
+![The run modes](images/run-mode.png)
+
+The **platform configuration** is the X-HEEP you build for: CPU, bus, memory and peripherals. Pick one of
+X-HEEP's, or create your own, as Python code or with the editor (see step 9).
+
+![The platform configurations](images/config.png)
+
+### 6. Build and run
+
+Click the Run button (▷) in the status bar. The first time, Run generates the platform and builds the Verilator
+model of X-HEEP: this takes a few minutes, once. Then it builds the app and runs it. Next time, only the app is
+rebuilt, and the model only when you change the configuration or the RTL.
+
+The Run button tells you the state of the model: a green ▶ when it is ready, a 🔧 when Run will build it first,
+a red ✗ when its build failed. The icon next to the app name tells the state of the app's build.
+
+The **X-HEEP** tab in the bottom panel (the screenshot at the top) shows the app's UART output on the left, closed
+by its exit code and the cycles it took, and the log of what the extension runs on the right: mcu-gen, model and
+app builds, the simulator, OpenOCD. Both are also in the *X-HEEP UART* and *X-HEEP* Output channels.
+
+Builds by hand count too: after a `make verilator-build` or a `make app` in a terminal, the status bar shows the
+model and the app as built.
+
+### 7. Debug
+
+Set a breakpoint, hover the app in the Applications view and click Debug (or run **X-HEEP: Debug Application**).
+
+- In **Simulation**, the extension builds a model with JTAG (once, a few more minutes), starts it with OpenOCD and
+  attaches GDB.
+- In **FPGA · JTAG**, it loads the app through the JTAG adapter and attaches GDB.
+
+Then use VS Code's debugger as usual: step, look at variables, the call stack and the registers.
+
+![Debugging an app in simulation, stopped at a breakpoint](images/debug.png)
+
+### 8. When something goes wrong
+
+The extension reads the build and run output and tells you what went wrong and what to do about it: apps that do
+not fit in memory, functions that need an operating system (`sleep`, `pthread_*`), stack overflows, exceptions,
+and programs stuck on the board. Compiler errors go to the Problems panel.
+
+![A build error explained: the app does not fit in memory](images/error.png)
+
+### 9. Explore and change the platform
+
+The **Memory Map** view, under Applications, shows the RAM, the address regions and the peripherals of the active
+platform, down to their registers and fields. **Copy Address** copies the C define of a register
+(`UART_START_ADDRESS + UART_CTRL_REG_OFFSET`).
+
+![The Memory Map view: the UART registers and the fields of CTRL](images/memory-map.png)
+
+To change the platform, click the configuration in the status bar and pick **New configuration with the
+editor…** (experimental). The editor is a form for CPU, bus, memory and peripherals, and shows how the RAM is
+split between code, data, heap and stack. **Save as…** writes a small Python file on top of the configuration you
+started from, and never edits the original. Prefer code? **New configuration (Python)…** starts from X-HEEP's
+`general.py`.
+
+![The platform editor](images/platform-editor.png)
+
+### 10. Run on the FPGA
+
+Officially supported boards: **PYNQ-Z2** and **AUP-ZU3**.
+
+1. Set `xheep.fpgaBoard` to your board, and plug in the board, its UART and the JTAG adapter.
+2. Set `xheep.bitstream` to the X-HEEP bitstream (`.bit`) you were given. With Vivado installed, you can build one
+   instead with **X-HEEP: Build Bitstream**.
+3. Pick **FPGA · JTAG** or **FPGA · Flash** in the status bar. The extension checks the board, the adapter and
+   their permissions, and says what is missing.
+4. Click Run. The extension loads the bitstream when needed (on the PYNQ-Z2 through OpenOCD, no Vivado needed),
+   then the app. The board's UART shows in the X-HEEP tab, as in simulation.
+
+The extension warns you when the active configuration does not match the hardware of the bitstream. To talk to the
+board yourself, run **X-HEEP: Open Serial Monitor**.
 
 ## Hardware development
 
@@ -52,14 +176,6 @@ For changes to the X-HEEP RTL:
   descriptions. Copy Address copies the C define (`UART_START_ADDRESS + UART_CTRL_REG_OFFSET`).
 - **App regression** in the Testing view: runs the apps on the simulation model of the active platform. An app
   passes when it exits with 0. Apps X-HEEP's own app test leaves out are skipped, unless you run them one by one.
-
-## FPGA
-
-Officially supported boards: **PYNQ-Z2** and **AUP-ZU3**.
-
-On the PYNQ-Z2, OpenOCD loads the bitstream (no Vivado needed). Set `xheep.bitstream` to a `.bit` file, or build
-one with **Build Bitstream**, which only appears when Vivado is installed. The extension warns when the active
-configuration does not match the hardware of the bitstream.
 
 ## Software-only projects
 

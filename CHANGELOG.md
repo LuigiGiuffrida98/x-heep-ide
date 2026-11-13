@@ -1,5 +1,6 @@
 # Change Log
 
+<<<<<<< Updated upstream
 ## 0.12.0
 
 - Tested with X-HEEP [2e12b16](https://github.com/x-heep/x-heep/commit/2e12b1610a45c3a68b4044b739e88273de3c8376).
@@ -8,6 +9,14 @@
 
 - Tested with X-HEEP [a793d92](https://github.com/x-heep/x-heep/commit/a793d92fea497a7656d5385a63f277b3548b47b4).
 
+||||||| Stash base
+=======
+## Unreleased
+
+- The README, which is also the Marketplace page, is now a step-by-step guide with screenshots: from an empty
+  folder to an app built, run and debugged in simulation, then on the FPGA.
+
+>>>>>>> Stashed changes
 ## 0.10.0
 
 - **Setup script** (`xheep.setupScript`), for servers where a script puts the tools on PATH: when tools are missing,

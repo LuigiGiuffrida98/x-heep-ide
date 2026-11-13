@@ -11,7 +11,7 @@
 
 ||||||| Stash base
 =======
-## Unreleased
+## 0.13.0
 
 - The README, which is also the Marketplace page, is now a step-by-step guide with screenshots: from an empty
   folder to an app built, run and debugged in simulation, then on the FPGA.

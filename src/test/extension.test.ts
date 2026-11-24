@@ -328,6 +328,17 @@ suite('Tool discovery', () => {
 		assert.ok(!('PWD' in env) && !('HOME' in env));
 	});
 
+	test('a setup script can call conda activate', () => {
+		const script = path.join(tmp, 'setup.sh');
+		fs.writeFileSync(script, 'conda activate core-v-mini-mcu\n');
+		// A stand-in conda whose shell hook defines the function, as the real one does.
+		exe(path.join(tmp, 'bin', 'conda'));
+		fs.writeFileSync(path.join(tmp, 'bin', 'conda'), '#!/bin/sh\necho \'conda() { export CONDA_PREFIX="/envs/$2"; }\'\n');
+		const dump = spawnSync('/bin/bash', ['-c', tools.SETUP_SCRIPT_COMMAND, 'x', script],
+			{ encoding: 'utf8', env: { ...process.env, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}` } }).stdout;
+		assert.strictEqual(tools.scriptEnvOf(dump).CONDA_PREFIX, '/envs/core-v-mini-mcu');
+	});
+
 	test('picks the Embecosm toolchain for the platform', () => {
 		assert.ok(tools.toolchainUrl('darwin', 'arm64')!.endsWith('corev-gcc-macos-arm64/8/artifact/corev-openhw-gcc-macos-20240530.dmg'));
 		assert.ok(tools.toolchainUrl('linux', 'x64', 'ID=ubuntu\nVERSION_ID="20.04"\n')!.includes('ubuntu2004-20240530.tar.gz'));

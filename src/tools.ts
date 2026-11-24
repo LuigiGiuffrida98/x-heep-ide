@@ -55,8 +55,11 @@ export function findConda(bases = CONDA_BASES): string | undefined {
 	return bases.map(b => path.join(b, 'bin', 'conda')).find(isExecutable);
 }
 
-/** Sources the setup script given as $1, then dumps the environment it leaves, NUL-separated (its own output to stderr). */
-export const SETUP_SCRIPT_COMMAND = 'source "$1" >&2 </dev/null; env -0';
+/**
+ * Sources the setup script given as $1, then dumps the environment it leaves, NUL-separated (its own output to stderr).
+ * Scripts written for a login shell call `conda activate`: the conda shell function comes first, as ~/.bashrc would define it.
+ */
+export const SETUP_SCRIPT_COMMAND = 'command -v conda >/dev/null && eval "$(conda shell.bash hook)" >&2; source "$1" >&2 </dev/null; env -0';
 
 /** The variables the setup script set or changed, from SETUP_SCRIPT_COMMAND's output; bash's own are left out. */
 export function scriptEnvOf(dump: string, base: NodeJS.ProcessEnv = process.env): Record<string, string> {

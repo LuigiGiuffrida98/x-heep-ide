@@ -93,9 +93,18 @@ function loadExamples(): Promise<void> {
 
 const expandHome = (p: string) => p.replace(/^~(?=$|\/)/, os.homedir());
 
+/**
+ * A path setting, if the path exists on this machine. A remote window also gets the local user settings, machine
+ * scoped ones too: a path on the laptop must not hide the server's tools.
+ */
+function pathSetting(key: string): string {
+	const p = expandHome(cfg().get<string>(key, '').trim());
+	return p && fs.existsSync(p) ? p : '';
+}
+
 function toolchain(): string {
 	const env = { ...process.env, ...scriptEnv };
-	return expandHome(cfg().get<string>('riscvToolchain') || env[soc?.toolchainVar ?? 'RISCV_XHEEP'] || env.RISCV_XHEEP || '~/.riscv');
+	return expandHome(pathSetting('riscvToolchain') || env[soc?.toolchainVar ?? 'RISCV_XHEEP'] || env.RISCV_XHEEP || '~/.riscv');
 }
 
 /** What `xheep.setupScript` sets (PATH, RISCV_XHEEP, licenses...): every command the extension runs gets it. */
@@ -119,11 +128,11 @@ async function loadSetupScript() {
 
 /** A tool's executable: its `xheep.<key>` setting (the executable or its folder), else `name` from PATH. */
 function toolExe(key: string, name: string): string {
-	const p = expandHome(cfg().get<string>(key, ''));
+	const p = pathSetting(key);
 	if (!p) {
 		return name;
 	}
-	return fs.existsSync(p) && fs.statSync(p).isDirectory() ? path.join(p, name) : p;
+	return fs.statSync(p).isDirectory() ? path.join(p, name) : p;
 }
 
 /** Folders of the tools set in the settings, put first in PATH for every command the extension runs. */
@@ -684,8 +693,20 @@ async function buildBitstream() {
 
 // --- Running make ---------------------------------------------------------
 
+/** The Python environment the setup script activates, if it does. */
+const scriptPython = () => scriptEnv.CONDA_PREFIX || scriptEnv.VIRTUAL_ENV;
+
+/**
+ * `xheep.envSetup`. Left at its default, it gives way to a setup script that activates a Python environment itself:
+ * the default's `conda activate x-heep` would replace that one, or fail on a server without an "x-heep" environment.
+ */
+function envSetup(): string {
+	const set = cfg().inspect<string>('envSetup');
+	return (set?.globalValue ?? (scriptPython() ? '' : set?.defaultValue) ?? '').trim();
+}
+
 function withEnvSetup(cmd: string): string {
-	const setup = cfg().get<string>('envSetup', '').trim();
+	const setup = envSetup();
 	return setup ? `${setup} && ${cmd}` : cmd;
 }
 
@@ -1995,7 +2016,7 @@ async function toolChecks(): Promise<Check[]> {
 	const wanted = requiredVersions(readText(path.join(root, 'docs', 'source', 'GettingStarted', 'Setup.md')));
 	const version = (what: string, got: string | undefined, want: string | undefined, why: string): Pick<Check, 'state' | 'text' | 'hint'> =>
 		!got ? { state: 'fail', text: what, hint: `not found: install ${what} ${want ?? ''}`.trim() }
-			: want && got !== want ? { state: 'warn', text: `${what} ${got}`, hint: `X-HEEP uses ${want}: ${why}` }
+			: want && got !== want ? { state: 'warn', text: `${what} ${got}`, hint: `${soc.name} uses ${want}: ${why}` }
 				: { state: 'ok', text: `${what} ${got}` };
 
 	const questa = cfg().get<Simulator>('simulator', 'verilator') === 'questasim';
@@ -2014,7 +2035,7 @@ async function toolChecks(): Promise<Check[]> {
 		{
 			id: 'verible', label: 'verible', usedBy: 'generating the platform', needed: true,
 			...version('verible', veribleVersion((await shOut(`'${toolExe('veriblePath', 'verible-verilog-format')}' --version`, true)).out), wanted.verible,
-				'platform generation would reformat X-HEEP\'s own files differently (they show as modified)'),
+				`platform generation would reformat ${soc.name}'s own files differently (they show as modified)`),
 		},
 		{
 			id: 'openocd', label: 'OpenOCD', usedBy: 'the FPGA modes', needed: fpga,
@@ -2029,8 +2050,8 @@ async function toolChecks(): Promise<Check[]> {
 
 /** The Python environment: that `xheep.envSetup` runs, and why not (no conda, no such environment), then X-HEEP's packages. */
 async function pythonCheck(): Promise<Pick<Check, 'state' | 'text' | 'hint'>> {
-	const setup = cfg().get<string>('envSetup', '').trim();
-	const text = `Python environment: ${setup || 'the repository .venv'}`;
+	const setup = envSetup();
+	const text = `Python environment: ${setup || (scriptPython() ? `${scriptPython()}, from the setup script` : 'the repository .venv')}`;
 	const env = await shOut('true');
 	if (!env.ok) {
 		const name = condaEnvName(setup);
@@ -2210,9 +2231,10 @@ async function checkEnv(quiet = false) {
  * tool, to change one that works (another toolchain, another Verilator, the container).
  */
 async function fixTools(all = false) {
-	for (; ;) {
+	for (let again = false; ; again = true) {
 		const tools = await toolChecks();
-		const pending = all ? tools : tools.filter(c => c.state !== 'ok' && c.needed);
+		// A version other than the one X-HEEP uses is offered once: after a fix, only missing tools bring the list back.
+		const pending = all ? tools : tools.filter(c => c.needed && (c.state === 'fail' || c.state === 'warn' && !again));
 		if (!pending.length) {
 			vscode.window.showInformationMessage('X-HEEP: all tools found.');
 			return;

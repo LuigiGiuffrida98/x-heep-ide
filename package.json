@@ -483,7 +483,7 @@
         "xheep.envSetup": {
           "type": "string",
           "default": "eval \"$(conda shell.bash hook)\" && conda activate x-heep",
-          "markdownDescription": "Bash snippet run before every `make` call to activate the X-HEEP Python environment. Leave empty to use the repo `.venv`.",
+          "markdownDescription": "Bash snippet run before every `make` call to activate the X-HEEP Python environment. Leave empty to use the repo `.venv`. Left at its default, it is skipped when `xheep.setupScript` activates a Python environment itself.",
           "scope": "machine"
         },
         "xheep.setupScript": {

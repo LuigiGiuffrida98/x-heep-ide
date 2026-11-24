@@ -10,6 +10,8 @@ import { SocId } from './soc';
 /** What media/platform.py reads from a configuration, as mcu-gen would build it. */
 export interface Platform {
 	cpu: string;
+	/** The parameters the configuration sets on the CPU: the others keep the RTL default. */
+	cpuParams: Params;
 	fpu: boolean;
 	bus: string;
 	/** Contiguous RAM banks, in KB. */
@@ -19,6 +21,8 @@ export interface Platform {
 	stack: number;
 	heap: number;
 	userPeripherals: string[];
+	/** By peripheral, base and user: what the configuration gives it, the rest keeps the class default. */
+	peripheralParams: Record<string, Params>;
 }
 
 /** Where everything is on the platform (media/platform.py map), with the peripherals' registers from regtool. */
@@ -77,15 +81,23 @@ export function mapNodes(map: AddressMap, soc: SocId = 'x-heep'): MapNode[] {
 	];
 }
 
+export type Params = Record<string, boolean | number | string>;
+
+/** A constructor parameter, as its type hint and docstring declare it; `bytes`: a size; no `default`: the RTL's. */
+export interface Param { name: string; doc: string; type: 'bool' | 'int' | 'str' | 'choice' | 'bytes'; choices?: string[]; default?: boolean | number | string }
+
+/** What xheep_gen offers the configuration's system, from its type hints and docstrings (media/platform.py catalog). */
 export interface Catalog {
-	cpus: string[];
-	userPeripherals: { name: string; cls: string; doc: string }[];
+	cpus: { name: string; doc: string; params: Param[] }[];
+	buses: { name: string; doc: string }[];
+	userPeripherals: { name: string; cls: string; doc: string; params: Param[] }[];
+	basePeripherals: { name: string; cls: string; doc: string; params: Param[] }[];
 }
 
 /** The editor's form. Memory is only editable when the contiguous banks share one size and there is at most one interleaved group. */
 export interface PlatformForm {
 	cpu: string;
-	fpu: boolean;
+	cpuParams: Params;
 	bus: string;
 	banks: number;
 	/** Size of each contiguous bank: a power of two, as xheep_gen requires. */
@@ -96,11 +108,11 @@ export interface PlatformForm {
 	stackKb: number;
 	heapKb: number;
 	peripherals: string[];
+	peripheralParams: Record<string, Params>;
 }
 
 /** Bank sizes the form offers, contiguous and interleaved (xheep_gen takes any power of two from 1 KB). */
 export const BANK_SIZES_KB = [8, 16, 32, 64];
-export const FPU_CPUS = ['cv32e40p', 'cv32e40px'];
 
 /** Whether the editor can represent the configuration's memory (else it shows it, and Python keeps it). */
 export function plainMemory(p: Platform): boolean {
@@ -110,7 +122,7 @@ export function plainMemory(p: Platform): boolean {
 export function formFromPlatform(p: Platform): PlatformForm {
 	const code = p.sections.find(s => s.name === 'code');
 	return {
-		cpu: p.cpu, fpu: p.fpu, bus: p.bus,
+		cpu: p.cpu, cpuParams: p.cpuParams, bus: p.bus,
 		banks: p.banks.length,
 		bankKb: p.banks[0] ?? 32,
 		codeKb: code?.end ? (code.end - code.start) / 1024 : 0,
@@ -118,6 +130,7 @@ export function formFromPlatform(p: Platform): PlatformForm {
 		ilSizeKb: p.interleaved[0]?.sizeKb ?? 16,
 		stackKb: p.stack / 1024, heapKb: p.heap / 1024,
 		peripherals: [...p.userPeripherals].sort(),
+		peripheralParams: p.peripheralParams,
 	};
 }
 
@@ -126,7 +139,8 @@ export function formFromPlatform(p: Platform): PlatformForm {
  * change the linker script, so a bitstream stays good across them, and across files describing the same hardware.
  */
 export function hardwareFingerprint(p: Platform): string {
-	const hw = { cpu: p.cpu, fpu: p.fpu, bus: p.bus, banks: p.banks, interleaved: p.interleaved, peripherals: [...p.userPeripherals].sort() };
+	const hw = { cpu: p.cpu, cpuParams: p.cpuParams, bus: p.bus, banks: p.banks, interleaved: p.interleaved, peripherals: [...p.userPeripherals].sort(),
+		peripheralParams: p.peripheralParams };
 	return createHash('sha1').update(JSON.stringify(hw)).digest('hex');
 }
 
@@ -135,7 +149,7 @@ export const archFor = (p: Pick<Platform, 'fpu'>) => p.fpu ? 'rv32imfc_zicsr' : 
 
 /** Form fields that change the hardware (needing a new simulation model and bitstream), not just the linker script. */
 export function hardwareChanges(base: PlatformForm, form: PlatformForm): string[] {
-	return (['cpu', 'fpu', 'bus', 'banks', 'bankKb', 'ilNum', 'ilSizeKb', 'peripherals'] as const)
+	return (['cpu', 'cpuParams', 'bus', 'banks', 'bankKb', 'ilNum', 'ilSizeKb', 'peripherals', 'peripheralParams'] as const)
 		.filter(k => JSON.stringify(base[k]) !== JSON.stringify(form[k]));
 }
 
@@ -146,9 +160,6 @@ export function changes(base: PlatformForm, form: PlatformForm): (keyof Platform
 /** What would keep mcu-gen or the apps from working, in the user's words. Empty when the form is fine. */
 export function formProblems(f: PlatformForm, memoryEditable: boolean): string[] {
 	const problems: string[] = [];
-	if (FPU_CPUS.indexOf(f.cpu) < 0 && f.fpu) {
-		problems.push(`${f.cpu} has no FPU.`);
-	}
 	if (memoryEditable) {
 		const total = f.banks * f.bankKb;
 		if (f.codeKb + f.stackKb + f.heapKb >= total) {
@@ -162,6 +173,9 @@ export function formProblems(f: PlatformForm, memoryEditable: boolean): string[]
 }
 
 const hex = (n: number) => `0x${n.toString(16)}`;
+
+/** `params` as Python keyword arguments. */
+const pyArgs = (params: Params) => Object.entries(params).map(([k, v]) => `${k}=${typeof v === 'boolean' ? (v ? 'True' : 'False') : JSON.stringify(v)}`).join(', ');
 
 /** Marks a file the editor owns; its JSON says what the form held, and which base it applies to. */
 const HEADER = '# xheep-ide: ';
@@ -186,9 +200,9 @@ export function overlayConfig(name: string, baseRel: string, base: PlatformForm,
 	const changed = new Set(changes(base, form));
 	const imports = new Set(['from pathlib import PurePath', 'from load_config import load_cfg_file']);
 	const body: string[] = [];
-	if (changed.has('cpu') || changed.has('fpu')) {
+	if (changed.has('cpu') || changed.has('cpuParams')) {
 		imports.add(`from cpu.${form.cpu} import ${form.cpu}`);
-		body.push(`    system.set_cpu(${form.cpu}(${FPU_CPUS.indexOf(form.cpu) >= 0 && form.fpu ? 'fpu=True' : ''}))`);
+		body.push(`    system.set_cpu(${form.cpu}(${pyArgs(form.cpuParams)}))`);
 	}
 	if (changed.has('bus')) {
 		imports.add('from bus_type import BusType');
@@ -214,7 +228,22 @@ export function overlayConfig(name: string, baseRel: string, base: PlatformForm,
 		imports.add('from linker_script.linker_script import LinkerScript');
 		body.push(`    system.set_linker_script_config(LinkerScript(stack_size=${hex(form.stackKb * 1024)}, heap_size=${hex(form.heapKb * 1024)}))`);
 	}
-	if (changed.has('peripherals')) {
+	// Peripherals whose parameters changed: rebuilt at the same address, with all the form gives them (length too).
+	const retuned = Object.keys(form.peripheralParams)
+		.filter(n => JSON.stringify(base.peripheralParams[n] ?? {}) !== JSON.stringify(form.peripheralParams[n]));
+	const isUser = (n: string) => catalog.userPeripherals.some(c => c.name === n);
+	const rebuild = (names: string[], list: string) => [
+		`    params = {${names.map(n => `${JSON.stringify(n)}: dict(${pyArgs(form.peripheralParams[n])})`).join(', ')}}`,
+		`    peripherals = [type(p)(p.get_address(), **params[p.get_name()]) if p.get_name() in params else p for p in ${list}]`,
+	];
+	const baseRetuned = retuned.filter(n => !isUser(n));
+	if (baseRetuned.length) {
+		imports.add('from peripherals.peripheral_domain import PeripheralDomain');
+		body.push('    base = system.get_base_peripheral_domain()', ...rebuild(baseRetuned, 'base.get_peripherals()'),
+			'    system.add_peripheral_domain(PeripheralDomain("base_peripheral_domain", base.get_power_domain(), base.has_clock_gating(), peripherals))');
+	}
+	const userRetuned = retuned.filter(n => isUser(n) && base.peripherals.includes(n) && form.peripherals.includes(n));
+	if (changed.has('peripherals') || userRetuned.length) {
 		// A new user domain replaces the base's: its getters hand out copies, which remove_peripheral() does not match.
 		const removed = base.peripherals.filter(p => form.peripherals.indexOf(p) < 0);
 		const added = form.peripherals.map(p => catalog.userPeripherals.find(c => c.name === p))
@@ -223,8 +252,11 @@ export function overlayConfig(name: string, baseRel: string, base: PlatformForm,
 		added.forEach(c => imports.add(`from peripherals.user_peripherals import ${c.cls}`));
 		body.push('    user = system.get_user_peripheral_domain()');
 		body.push(`    peripherals = ${removed.length ? `[p for p in user.get_peripherals() if p.get_name() not in (${removed.map(r => JSON.stringify(r)).join(', ')},)]` : 'user.get_peripherals()'}`);
+		if (userRetuned.length) {
+			body.push(...rebuild(userRetuned, 'peripherals'));
+		}
 		if (added.length) {
-			body.push(`    peripherals += [${added.map(c => `${c.cls}()`).join(', ')}]  # placed by the generator`);
+			body.push(`    peripherals += [${added.map(c => `${c.cls}(${pyArgs(form.peripheralParams[c.name] ?? {})})`).join(', ')}]  # placed by the generator`);
 		}
 		body.push('    system.add_peripheral_domain(PeripheralDomain("user_peripheral_domain", user.get_power_domain(), user.has_clock_gating(), peripherals))');
 	}

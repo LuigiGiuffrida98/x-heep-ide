@@ -115,7 +115,7 @@ h2 { font-size: .85em; letter-spacing: .08em; text-transform: uppercase; color: 
 .row > .lab { padding-top: 4px; }
 .hint { color: var(--muted); margin-top: 4px; }
 @media (max-width: 560px) { .row { grid-template-columns: 1fr; } .row > .lab { padding-top: 0; font-weight: 600; } }
-select, input[type=number] { font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--line)); border-radius: 2px; padding: 3px 6px; }
+select, input[type=number], input[type=text] { font: inherit; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--line)); border-radius: 2px; padding: 3px 6px; }
 select { max-width: 100%; }
 input[type=number] { width: 80px; font-family: var(--mono); }
 :focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
@@ -170,10 +170,10 @@ function html(nonce: string, csp: string): string {
 		<div class="row">
 			<label class="lab" for="cpu">CPU</label>
 			<div><select id="cpu"></select><div class="hint" id="cpu-hint"></div></div>
-			<div class="lab">Floating point</div>
-			<div><label class="toggle"><input type="checkbox" id="fpu"> Hardware FPU (F extension)</label><div class="hint" id="fpu-hint"></div></div>
+			<div class="lab">CPU options</div>
+			<div id="cpu-params" style="display:grid; gap:10px"></div>
 			<div class="lab">Bus</div>
-			<div><div class="seg" role="group" aria-label="Bus"><button id="bus-onetoM">One master at a time</button><button id="bus-NtoM">Parallel (N to M)</button></div>
+			<div><div class="seg" role="group" aria-label="Bus" id="bus"></div>
 				<div class="hint">Parallel lets the DMA and accelerators use memory while the CPU runs. It takes more FPGA area.</div></div>
 		</div>
 	</section>
@@ -205,6 +205,7 @@ function html(nonce: string, csp: string): string {
 		<h2>Peripherals</h2>
 		<div class="periph" id="periph"></div>
 		<div class="hint">Always included: SoC control, boot ROM, SPI flash, DMA, power manager, always-on timer and GPIO, pad control.</div>
+		<div class="row" id="periph-params" style="margin-top:14px"></div>
 	</section>
 	<div id="notes" style="display:grid; gap:6px; padding-bottom:12px"></div>
 	<footer><span class="cost" id="cost"></span><button class="btn" id="revert">Revert</button><button class="btn primary" id="apply">Apply</button></footer>
@@ -213,10 +214,7 @@ function html(nonce: string, csp: string): string {
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
 const $ = id => document.getElementById(id);
-const CPU_DOC = { cv32e20: 'small, RV32IMC. The default.', cv32e40p: 'larger and faster, optional FPU, PULP DSP instructions.',
-	cv32e40x: 'X-interface for custom coprocessors.', cv32e40px: 'cv32e40p with the X-interface.' };
-const FPU_CPUS = ['cv32e40p', 'cv32e40px'];
-const HW = ['cpu', 'fpu', 'bus', 'banks', 'bankKb', 'ilNum', 'ilSizeKb', 'peripherals'];
+const HW = ['cpu', 'cpuParams', 'bus', 'banks', 'bankKb', 'ilNum', 'ilSizeKb', 'peripherals', 'peripheralParams'];
 let st, f, error;
 
 window.addEventListener('message', ({ data: m }) => {
@@ -238,14 +236,19 @@ function render() {
 	$('start').hidden = !creating;
 	$('open').hidden = creating;
 	$('apply').textContent = creating ? 'Save as…' : 'Apply';
-	$('cpu').innerHTML = st.catalog.cpus.map(c => '<option value="' + c + '">' + c + ' · ' + (CPU_DOC[c] || '') + '</option>').join('');
+	// CPUs, their options and the buses are what xheep_gen declares (type hints and docstrings), not listed here.
+	$('cpu').replaceChildren(...st.catalog.cpus.map(c => new Option(c.name + (c.doc ? ' · ' + c.doc : ''), c.name)));
 	$('cpu').value = f.cpu;
-	const fpuOk = FPU_CPUS.includes(f.cpu);
-	if (!fpuOk) f.fpu = false;
-	$('fpu').checked = f.fpu; $('fpu').disabled = !fpuOk;
-	$('fpu-hint').textContent = !fpuOk ? 'Only cv32e40p and cv32e40px have an FPU.' : f.fpu ? 'Apps are built with ARCH=rv32imfc_zicsr to use it.' : 'Floats are computed in software.';
-	$('cpu-hint').textContent = 'Changing the CPU resets its other options to their defaults.';
-	for (const b of ['onetoM', 'NtoM']) $('bus-' + b).setAttribute('aria-pressed', String(f.bus === b));
+	$('cpu-hint').textContent = 'Changing the CPU resets its options to their defaults.' + (f.cpuParams.fpu ? ' With the FPU, apps are built with ARCH=rv32imfc_zicsr.' : '');
+	const cpu = st.catalog.cpus.find(c => c.name === f.cpu) || { params: [] };
+	$('cpu-params').replaceChildren(...cpu.params.map(p => paramField(p, f, 'cpuParams')));
+	if (!cpu.params.length) $('cpu-params').textContent = 'None.';
+	$('bus').replaceChildren(...st.catalog.buses.map(b => {
+		const el = document.createElement('button');
+		el.textContent = b.doc; el.title = b.name; el.setAttribute('aria-pressed', String(f.bus === b.name));
+		el.onclick = () => { f.bus = b.name; render(); };
+		return el;
+	}));
 
 	// Memory: one row per use (code, data, interleaved) on one scale, from the form, or from the configuration as
 	// is when the form cannot represent it. The form below follows the same order.
@@ -292,6 +295,16 @@ function render() {
 		el.parentElement.querySelector('small').textContent = names[i].doc;
 		el.onchange = () => { f.peripherals = el.checked ? [...f.peripherals, el.dataset.p].sort() : f.peripherals.filter(x => x !== el.dataset.p); render(); };
 	});
+	// The options of the peripherals in the platform: the always-on ones it has, then the chosen user ones.
+	const tunable = [...st.catalog.basePeripherals.filter(c => c.name in st.platform.peripheralParams), ...names.filter(c => f.peripherals.includes(c.name))]
+		.filter(c => c.params.length);
+	$('periph-params').replaceChildren(...tunable.flatMap(c => {
+		const lab = document.createElement('div'), fields = document.createElement('div');
+		lab.className = 'lab'; lab.textContent = c.name; lab.title = c.doc;
+		fields.style.cssText = 'display:flex; flex-wrap:wrap; gap:8px 18px';
+		fields.replaceChildren(...c.params.map(p => paramField(p, f.peripheralParams, c.name, true)));
+		return [lab, fields];
+	}));
 
 	const notes = [];
 	if (st.memoryEditable && f.codeKb + f.stackKb + f.heapKb >= f.banks * f.bankKb) notes.push(['err', 'Does not fit:', 'code, stack and heap take more than the RAM. Add banks or shrink them.']);
@@ -316,9 +329,50 @@ function render() {
 	$('revert').disabled = !changed.length;
 }
 
-$('cpu').onchange = e => { f.cpu = e.target.value; render(); };
-$('fpu').onchange = e => { f.fpu = e.target.checked; render(); };
-for (const b of ['onetoM', 'NtoM']) $('bus-' + b).onclick = () => { f.bus = b; render(); };
+/**
+ * A constructor parameter (of the CPU or a peripheral) as its type asks, set in owner[key] (made on the first
+ * change). Left empty, the configuration does not give it: the class default holds, or the RTL's when the class has none.
+ */
+function paramField(p, owner, key, compact) {
+	const v = (owner[key] || {})[p.name];
+	const show = x => p.type === 'bytes' ? bytes(x) : x === true ? 'on' : x === false ? 'off' : String(x);
+	const dflt = 'default' + (p.default !== undefined ? ' (' + show(p.default) + ')' : '');
+	const el = document.createElement(p.type === 'bool' || p.type === 'choice' ? 'select' : 'input');
+	if (el.tagName === 'INPUT') {
+		Object.assign(el, { type: p.type === 'int' ? 'number' : 'text', placeholder: dflt, value: v === undefined ? '' : show(v) });
+		if (p.type === 'bytes') el.size = 12;
+	} else {
+		const opts = p.type === 'bool' ? [['true', 'on'], ['false', 'off']] : (p.choices || []).map(c => [c, c]);
+		el.replaceChildren(...[['', dflt], ...opts].map(([val, text]) => new Option(text, val)));
+		el.value = v === undefined ? '' : String(v);
+	}
+	el.onchange = () => {
+		const n = p.type === 'bytes' ? parseBytes(el.value) : undefined;
+		if (el.value !== '' && p.type === 'bytes' && !(n > 0)) {
+			el.setCustomValidity('A size, like 64 KB, 512 B or 0x7000.'); el.reportValidity(); return;
+		}
+		const values = owner[key] ??= {};
+		if (el.value === '') delete values[p.name];
+		else values[p.name] = p.type === 'bytes' ? n : p.type === 'bool' ? el.value === 'true' : p.type === 'int' ? Number(el.value) : el.value;
+		render();
+	};
+	const label = document.createElement('label'), code = document.createElement('code');
+	label.className = 'toggle'; code.textContent = p.name; label.append(code, el);
+	if (compact) { label.title = p.doc; return label; }
+	const hint = document.createElement('div'), row = document.createElement('div');
+	hint.className = 'hint'; hint.textContent = p.doc;
+	row.append(label, hint);
+	return row;
+}
+
+/** A size as people write it: 64 KB, 1 MB, 512 B, 0x7000 or plain bytes. NaN when it is not one. */
+function parseBytes(s) {
+	const m = /^\\s*(0x[0-9a-f]+|\\d+)\\s*(b|kb?|mb?)?\\s*$/i.exec(s);
+	return m ? Number(m[1]) * ({ k: 1024, kb: 1024, m: 1048576, mb: 1048576 }[(m[2] || 'b').toLowerCase()] || 1) : NaN;
+}
+const bytes = n => n % 1048576 === 0 ? n / 1048576 + ' MB' : n % 1024 === 0 ? n / 1024 + ' KB' : n % 256 === 0 ? '0x' + n.toString(16) : n + ' B';
+
+$('cpu').onchange = e => { f.cpu = e.target.value; f.cpuParams = {}; render(); };
 $('banks-dn').onclick = () => { f.banks = Math.max(1, f.banks - 1); render(); };
 $('banks-up').onclick = () => { f.banks = Math.min(32, f.banks + 1); render(); };
 $('il-size').onchange = e => { f.ilSizeKb = Number(e.target.value); render(); };

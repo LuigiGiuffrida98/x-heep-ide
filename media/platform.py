@@ -17,23 +17,71 @@ import sys
 from pathlib import PurePath
 
 
-def catalog():
-    """CPUs and user peripherals xheep_gen knows, with their first doc line."""
+# Where a peripheral starts in its domain: the configuration's or the generator's, not the editor's.
+PLACEMENT = {"address", "offset"}
+
+
+def catalog(xheep):
+    """What xheep_gen offers this system: CPUs, buses and peripherals with their parameters, from its type hints
+    and docstrings (first line; `:param name:` and `:cvar name:` lines, one line each)."""
+    import importlib
+    import types
+    import typing
+    import peripherals.base_peripherals as bp
     import peripherals.user_peripherals as up
-    from peripherals.abstractions import UserPeripheral
+    from bus_type import BusType
+    from peripherals.abstractions import BasePeripheral, Peripheral, UserPeripheral
 
     def doc(cls):
         return (inspect.getdoc(cls) or "").split("\n")[0].strip()
 
-    periph = sorted(
-        {
-            obj._name: {"name": obj._name, "cls": name, "doc": doc(obj)}
-            for name, obj in vars(up).items()
-            if inspect.isclass(obj) and issubclass(obj, UserPeripheral) and obj is not UserPeripheral and getattr(obj, "_name", None)
-        }.values(),
-        key=lambda p: p["name"],
-    )
-    return {"cpus": ["cv32e20", "cv32e40p", "cv32e40x", "cv32e40px"], "userPeripherals": periph}
+    def fields(obj, kind):
+        return dict(re.findall(rf"^:{kind} (?:\S+ )?(\w+): (.+)$", inspect.getdoc(obj) or "", re.M))
+
+    def param(p, hint, docs):
+        # Optional[X] is X, unset: the default.
+        if typing.get_origin(hint) in (typing.Union, getattr(types, "UnionType", None)):
+            hint = next((a for a in typing.get_args(hint) if a is not type(None)), None)
+        out = {"name": p.name, "doc": docs.get(p.name, "")}
+        if isinstance(p.default, (bool, int, float, str)):
+            out["default"] = p.default
+        if typing.get_origin(hint) is typing.Annotated:  # Annotated[int, "bytes"]: a size
+            if "bytes" in hint.__metadata__:
+                return {**out, "type": "bytes"}
+            hint = typing.get_args(hint)[0]
+        if typing.get_origin(hint) is typing.Literal:
+            return {**out, "type": "choice", "choices": list(typing.get_args(hint))}
+        return {**out, "type": {bool: "bool", int: "int"}.get(hint, "str")}
+
+    def params(cls, skip=()):
+        hints, docs = typing.get_type_hints(cls.__init__, include_extras=True), fields(cls.__init__, "param")
+        return [param(p, hints.get(p.name), docs) for p in list(inspect.signature(cls.__init__).parameters.values())[1:] if p.name not in skip]
+
+    def cpu(name):
+        cls = getattr(importlib.import_module(f"cpu.{name}"), name)
+        return {"name": name, "doc": doc(cls), "params": params(cls)}
+
+    def peripheral(name, cls):
+        # A class keeping Peripheral's constructor does not master the bus; length unset is the class's _length.
+        own = params(cls, PLACEMENT if cls.__init__ is not Peripheral.__init__ else PLACEMENT | {"num_master_ports"})
+        own = [{**p, "default": cls._length} if p["name"] == "length" and "default" not in p else p for p in own]
+        return {"name": cls._name, "cls": name, "doc": doc(cls), "params": own}
+
+    def peripherals(pkg, kind):
+        found = {
+            obj._name: peripheral(name, obj)
+            for name, obj in vars(pkg).items()
+            if inspect.isclass(obj) and issubclass(obj, kind) and obj is not kind and getattr(obj, "_name", None)
+        }
+        return sorted(found.values(), key=lambda p: p["name"])
+
+    buses = fields(BusType, "cvar")
+    return {
+        "cpus": [cpu(n) for n in xheep.get_available_cpus()],
+        "buses": [{"name": b.value, "doc": buses.get(b.name, b.value)} for b in type(xheep).AVAILABLE_BUS_TYPES],
+        "userPeripherals": peripherals(up, UserPeripheral),
+        "basePeripherals": peripherals(bp, BasePeripheral),
+    }
 
 
 def read(xheep):
@@ -44,6 +92,7 @@ def read(xheep):
     return {
         "cpu": cpu.get_name(),
         "fpu": bool(getattr(cpu, "params", {}).get("fpu", False)) if hasattr(cpu, "params") else bool(getattr(cpu, "fpu", False)),
+        "cpuParams": cpu.params,
         "bus": xheep.bus_type().value if hasattr(xheep.bus_type(), "value") else str(xheep.bus_type()),
         "banks": [b.size() // 1024 for b in mem.iter_ram_banks() if b.name() not in il_idx],
         "interleaved": [{"num": g.n, "sizeKb": g.size // g.n // 1024} for g in il_groups],
@@ -51,6 +100,13 @@ def read(xheep):
         "stack": xheep.stack_size(),
         "heap": xheep.heap_size(),
         "userPeripherals": [p.get_name() for p in xheep.get_user_peripheral_domain().get_peripherals()],
+        # What the configuration gives each peripheral; the rest keeps the class default.
+        "peripheralParams": {
+            p.get_name(): {k: v for k, v in p.get_params().items() if k not in PLACEMENT}
+            for d in (xheep.get_base_peripheral_domain(), xheep.get_user_peripheral_domain())
+            if d
+            for p in d.get_peripherals()
+        },
     }
 
 
@@ -274,7 +330,7 @@ def main():
                 out["catalog"] = catalog_xalp(xheep)
             elif cmd == "read":
                 out["platform"] = read(xheep)
-                out["catalog"] = catalog()
+                out["catalog"] = catalog(xheep)
             elif cmd == "map":
                 out["map"] = address_map(xheep, root)
             else:

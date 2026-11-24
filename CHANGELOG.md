@@ -1,6 +1,6 @@
 # Change Log
 
-## Unreleased
+## 0.13.1
 
 - **Remote windows (SSH)**: a tool path set on your computer, which VS Code also passes to the server, no longer
   hides the server's tools: path settings that do not exist on the server are ignored.

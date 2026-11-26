@@ -1,5 +1,9 @@
 # Change Log
 
+## Unreleased
+
+- Tested with X-HEEP [bb973a5](https://github.com/x-heep/x-heep/commit/bb973a54e2149ad07e1e21aae3c1490f2ceb2c01).
+
 ## 0.13.1
 
 - **Remote windows (SSH)**: a tool path set on your computer, which VS Code also passes to the server, no longer
